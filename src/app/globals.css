@@ -1,0 +1,72 @@
+@import "tailwindcss";
+
+/* Design tokens — Question to Google Form */
+@theme {
+  --color-brand-50: #f5f3ff;
+  --color-brand-100: #ede7f6;
+  --color-brand-200: #d1c4e9;
+  --color-brand-300: #b39ddb;
+  --color-brand-400: #9575cd;
+  --color-brand-500: #7e57c2;
+  --color-brand-600: #673ab7;
+  --color-brand-700: #5e35b1;
+  --color-brand-800: #4527a0;
+  --color-brand-900: #311b92;
+  --color-lavender: #f5f3ff;
+  --color-success-50: #f0fdf4;
+  --color-success-100: #dcfce7;
+  --color-success-600: #16a34a;
+  --color-success-700: #15803d;
+  --color-danger-50: #fef2f2;
+  --color-danger-100: #fee2e2;
+  --color-danger-600: #dc2626;
+  --color-danger-700: #b91c1c;
+  --color-ink: #1f1b2e;
+  --color-muted: #5b5670;
+  --color-line: #e7e3f0;
+  --color-canvas: #fbfaff;
+
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: var(--font-mono-family), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --shadow-card: 0 1px 2px rgb(31 27 46 / 0.04), 0 4px 16px rgb(103 58 183 / 0.06);
+  --shadow-pop: 0 10px 40px rgb(49 27 146 / 0.16);
+  --radius-card: 1rem;
+}
+
+html {
+  scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  background: #ffffff;
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+}
+
+::selection {
+  background: var(--color-brand-200);
+}
+
+:focus-visible {
+  outline: 3px solid var(--color-brand-400);
+  outline-offset: 2px;
+}
+
+dialog::backdrop {
+  background: rgb(31 27 46 / 0.45);
+  backdrop-filter: blur(2px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
