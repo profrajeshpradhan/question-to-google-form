@@ -1,13 +1,18 @@
+import { formConfigSchema, type FormConfig } from "@/lib/quiz/form-config";
+
 /**
  * The teacher's in-progress input is kept in this browser tab's sessionStorage
  * only (never sent anywhere except to create the form). It survives reloads and
  * the OAuth reconnect redirect, and is cleared on success, sign-out or tab close.
+ * Form settings, identification fields and sections are kept the same way.
  */
 
 export interface Draft {
   title: string;
   description: string;
   input: string;
+  /** Settings, identification fields and sections (absent in drafts saved before they existed). */
+  config?: FormConfig;
   /** A form created by a run that did not finish, so the teacher can find it again. */
   pendingForm?: { formId: string; editUrl: string };
 }
@@ -23,6 +28,7 @@ export function loadDraft(): Draft | null {
       title: typeof parsed.title === "string" ? parsed.title : "",
       description: typeof parsed.description === "string" ? parsed.description : "",
       input: typeof parsed.input === "string" ? parsed.input : "",
+      config: formConfigSchema.safeParse(parsed.config).data,
       pendingForm:
         parsed.pendingForm && typeof parsed.pendingForm.formId === "string" && typeof parsed.pendingForm.editUrl === "string"
           ? parsed.pendingForm

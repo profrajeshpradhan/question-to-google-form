@@ -29,7 +29,7 @@ export function createGoogleFormsApi(accessToken: string): FormsApi {
       return res.data;
     },
     async publish(formId) {
-      await client.forms.setPublishSettings(
+      const res = await client.forms.setPublishSettings(
         {
           formId,
           requestBody: {
@@ -39,6 +39,7 @@ export function createGoogleFormsApi(accessToken: string): FormsApi {
         },
         requestOptions,
       );
+      return res.data.publishSettings;
     },
   };
 }

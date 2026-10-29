@@ -53,6 +53,11 @@ export async function mockStats(): Promise<{ creates: number; batchUpdates: numb
   return (await fetch("http://127.0.0.1:4010/__stats")).json();
 }
 
+/** The most recently created form as stored by the mock Forms API. */
+export async function lastMockForm(): Promise<{ settings?: { emailCollectionType?: string; quizSettings?: { isQuiz?: boolean } }; items: Record<string, unknown>[] }> {
+  return (await fetch("http://127.0.0.1:4010/__last")).json();
+}
+
 export async function fillEditor(page: Page, { title, input, description = "" }: { title: string; input: string; description?: string }) {
   await page.getByLabel("Form Title").fill(title);
   if (description) await page.getByLabel("Form Description").fill(description);

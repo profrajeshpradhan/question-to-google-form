@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { forms_v1 } from "@googleapis/forms";
 import { createQuiz, resumeQuiz, type FormsApi } from "@/lib/forms/forms-service";
-import { buildQuestionRequests, buildSettingsRequests, editUrlFor, verifyForm } from "@/lib/forms/build-requests";
+import { buildContentRequests, buildSettingsRequests, editUrlFor, verifyForm } from "@/lib/forms/build-requests";
 import type { CreateEvent } from "@/lib/forms/events";
+import { legacyConfig, reconcileSections, type FormConfig } from "@/lib/quiz/form-config";
 import { parseQuiz, SAMPLE_INPUT } from "@/lib/quiz/parser";
 import type { Quiz } from "@/lib/quiz/types";
 
@@ -10,6 +11,11 @@ function sampleQuiz(): Quiz {
   const result = parseQuiz({ input: SAMPLE_INPUT });
   if (!result.ok) throw new Error("sample should parse");
   return result.quiz;
+}
+
+/** The single-section configuration that reproduces the original behaviour. */
+function cfg(quiz: Quiz = sampleQuiz()): FormConfig {
+  return reconcileSections(legacyConfig(), quiz.questions.map((q) => q.number));
 }
 
 /** In-memory fake of the Google Forms API that applies batchUpdate requests like Google does. */
@@ -33,7 +39,13 @@ class FakeForms implements FormsApi {
     if (this.failOn[key]) throw this.failOn[key];
     if (!this.form || formId !== this.form.formId) throw { response: { status: 404 } };
     for (const r of requests) {
-      if (r.updateSettings) this.form.settings = { ...this.form.settings, quizSettings: { isQuiz: r.updateSettings.settings?.quizSettings?.isQuiz ?? false } };
+      if (r.updateSettings) {
+        this.form.settings = {
+          ...this.form.settings,
+          quizSettings: { isQuiz: r.updateSettings.settings?.quizSettings?.isQuiz ?? false },
+          emailCollectionType: r.updateSettings.settings?.emailCollectionType,
+        };
+      }
       if (r.updateFormInfo) this.form.info = { ...this.form.info, description: r.updateFormInfo.info?.description };
       if (r.createItem) this.form.items!.splice(r.createItem.location?.index ?? 0, 0, { itemId: `i${this.form.items!.length}`, ...r.createItem.item });
     }
@@ -50,6 +62,7 @@ class FakeForms implements FormsApi {
     this.calls.push("publish");
     if (this.failOn.publish) throw this.failOn.publish;
     this.form!.publishSettings = { publishState: { isPublished: true, isAcceptingResponses: true } };
+    return structuredClone(this.form!.publishSettings);
   }
 }
 
@@ -60,15 +73,20 @@ const collect = () => {
 
 describe("request builders", () => {
   it("builds quiz settings and description requests with update masks", () => {
-    expect(buildSettingsRequests(sampleQuiz())).toEqual([
-      { updateSettings: { settings: { quizSettings: { isQuiz: true } }, updateMask: "quizSettings.isQuiz" } },
+    expect(buildSettingsRequests(sampleQuiz(), cfg())).toEqual([
+      {
+        updateSettings: {
+          settings: { quizSettings: { isQuiz: true }, emailCollectionType: "DO_NOT_COLLECT" },
+          updateMask: "quizSettings.isQuiz,emailCollectionType",
+        },
+      },
       { updateFormInfo: { info: { description: "Unit 1 Assessment" }, updateMask: "description" } },
     ]);
-    expect(buildSettingsRequests({ ...sampleQuiz(), description: "" })).toHaveLength(1);
+    expect(buildSettingsRequests({ ...sampleQuiz(), description: "" }, cfg())).toHaveLength(1);
   });
 
   it("builds graded RADIO questions in order with integer points and one answer key", () => {
-    const requests = buildQuestionRequests(sampleQuiz());
+    const requests = buildContentRequests(sampleQuiz(), cfg());
     expect(requests).toHaveLength(2);
     expect(requests[0]).toEqual({
       createItem: {
@@ -111,7 +129,7 @@ describe("createQuiz", () => {
 
   it("creates, configures, verifies and publishes a real quiz structure", async () => {
     const { events, emit } = collect();
-    const result = await createQuiz(api, sampleQuiz(), { publish: true }, emit);
+    const result = await createQuiz(api, sampleQuiz(), cfg(), { publish: true }, emit);
     expect(api.calls).toEqual(["create", "batch1", "batch2", "get", "publish"]);
     expect(result).toEqual({
       formId: "FORM_ID_1234567890",
@@ -121,6 +139,8 @@ describe("createQuiz", () => {
       published: true,
       questionCount: 2,
       totalMarks: 3,
+      sectionCount: 1,
+      fieldCount: 0,
     });
     const steps = events.filter((e) => e.type === "step").map((e) => e.type === "step" && `${e.step}:${e.status}`);
     expect(steps).toEqual([
@@ -128,12 +148,12 @@ describe("createQuiz", () => {
       "verify:active", "verify:done", "publish:active", "publish:done",
     ]);
     expect(events.at(-1)?.type).toBe("result");
-    expect(verifyForm(api.form!, sampleQuiz())).toEqual([]);
+    expect(verifyForm(api.form!, sampleQuiz(), cfg())).toEqual([]);
   });
 
   it("skips publishing when not requested", async () => {
     const { events, emit } = collect();
-    const result = await createQuiz(api, sampleQuiz(), { publish: false }, emit);
+    const result = await createQuiz(api, sampleQuiz(), cfg(), { publish: false }, emit);
     expect(api.calls).not.toContain("publish");
     expect(result?.published).toBe(false);
     expect(events).toContainEqual({ type: "step", step: "publish", status: "skipped" });
@@ -142,7 +162,7 @@ describe("createQuiz", () => {
   it("reports failure before a form exists without a form ID", async () => {
     api.failOn.create = { response: { status: 403, data: { error: { status: "PERMISSION_DENIED", message: "Google Forms API has not been used in project 1 before or it is disabled." } } } };
     const { events, emit } = collect();
-    expect(await createQuiz(api, sampleQuiz(), { publish: true }, emit)).toBeNull();
+    expect(await createQuiz(api, sampleQuiz(), cfg(), { publish: true }, emit)).toBeNull();
     const error = events.find((e) => e.type === "error");
     expect(error).toMatchObject({ type: "error", error: { code: "google_api_disabled", step: "create", resumable: false } });
     expect(error?.type === "error" && error.error.formId).toBeUndefined();
@@ -151,7 +171,7 @@ describe("createQuiz", () => {
   it("reports a partial failure with the existing form and never creates a second form", async () => {
     api.failOn.batch2 = { response: { status: 503 } };
     const { events, emit } = collect();
-    expect(await createQuiz(api, sampleQuiz(), { publish: true }, emit)).toBeNull();
+    expect(await createQuiz(api, sampleQuiz(), cfg(), { publish: true }, emit)).toBeNull();
     expect(api.calls.filter((c) => c === "create")).toHaveLength(1);
     expect(events).toContainEqual({ type: "form", formId: "FORM_ID_1234567890", editUrl: editUrlFor("FORM_ID_1234567890") });
     expect(events.at(-1)).toMatchObject({
@@ -163,7 +183,7 @@ describe("createQuiz", () => {
   it("maps an expired token to session_expired", async () => {
     api.failOn.create = { response: { status: 401 } };
     const { events, emit } = collect();
-    await createQuiz(api, sampleQuiz(), { publish: true }, emit);
+    await createQuiz(api, sampleQuiz(), cfg(), { publish: true }, emit);
     expect(events.at(-1)).toMatchObject({ type: "error", error: { code: "session_expired" } });
   });
 
@@ -172,7 +192,7 @@ describe("createQuiz", () => {
       form.items![1].questionItem!.question!.grading!.pointValue = 5;
     };
     const { events, emit } = collect();
-    expect(await createQuiz(api, sampleQuiz(), { publish: true }, emit)).toBeNull();
+    expect(await createQuiz(api, sampleQuiz(), cfg(), { publish: true }, emit)).toBeNull();
     expect(api.calls).not.toContain("publish");
     expect(events.some((e) => e.type === "result")).toBe(false);
     expect(events.at(-1)).toMatchObject({ type: "error", error: { code: "verification_failed", details: ["Q2: Marks should be 1."] } });
@@ -181,7 +201,7 @@ describe("createQuiz", () => {
   it("reports publish failure as resumable with the form link", async () => {
     api.failOn.publish = { response: { status: 500 } };
     const { events, emit } = collect();
-    await createQuiz(api, sampleQuiz(), { publish: true }, emit);
+    await createQuiz(api, sampleQuiz(), cfg(), { publish: true }, emit);
     expect(events.at(-1)).toMatchObject({ type: "error", error: { step: "publish", resumable: true, formId: "FORM_ID_1234567890" } });
   });
 });
@@ -195,38 +215,38 @@ describe("resumeQuiz", () => {
 
   it("adds questions to an empty existing form without calling create", async () => {
     api.failOn.batch2 = { response: { status: 503 } };
-    await createQuiz(api, sampleQuiz(), { publish: true }, () => {});
+    await createQuiz(api, sampleQuiz(), cfg(), { publish: true }, () => {});
     api.failOn = {};
     api.calls = [];
     const { events, emit } = collect();
-    const result = await resumeQuiz(api, "FORM_ID_1234567890", sampleQuiz(), { publish: true }, emit);
+    const result = await resumeQuiz(api, "FORM_ID_1234567890", sampleQuiz(), cfg(), { publish: true }, emit);
     expect(result?.published).toBe(true);
     expect(api.calls).not.toContain("create");
     expect(events).toContainEqual({ type: "step", step: "quiz", status: "skipped" });
-    expect(verifyForm(api.form!, sampleQuiz())).toEqual([]);
+    expect(verifyForm(api.form!, sampleQuiz(), cfg())).toEqual([]);
   });
 
   it("only publishes when the questions were already added", async () => {
     api.failOn.publish = { response: { status: 500 } };
-    await createQuiz(api, sampleQuiz(), { publish: true }, () => {});
+    await createQuiz(api, sampleQuiz(), cfg(), { publish: true }, () => {});
     api.failOn = {};
     api.calls = [];
-    const result = await resumeQuiz(api, "FORM_ID_1234567890", sampleQuiz(), { publish: true }, () => {});
+    const result = await resumeQuiz(api, "FORM_ID_1234567890", sampleQuiz(), cfg(), { publish: true }, () => {});
     expect(result?.published).toBe(true);
     expect(api.calls).toEqual(["get", "get", "publish"]);
   });
 
   it("refuses to modify a form whose questions differ", async () => {
-    await createQuiz(api, sampleQuiz(), { publish: false }, () => {});
+    await createQuiz(api, sampleQuiz(), cfg(), { publish: false }, () => {});
     const other = { ...sampleQuiz(), questions: sampleQuiz().questions.slice(0, 1) };
     const { events, emit } = collect();
-    expect(await resumeQuiz(api, "FORM_ID_1234567890", other, { publish: true }, emit)).toBeNull();
+    expect(await resumeQuiz(api, "FORM_ID_1234567890", other, cfg(other), { publish: true }, emit)).toBeNull();
     expect(events.at(-1)).toMatchObject({ type: "error", error: { code: "resume_unsafe", resumable: false } });
   });
 
   it("reports a missing form as not found", async () => {
     const { events, emit } = collect();
-    await resumeQuiz(api, "MISSING_FORM_123", sampleQuiz(), { publish: true }, emit);
+    await resumeQuiz(api, "MISSING_FORM_123", sampleQuiz(), cfg(), { publish: true }, emit);
     expect(events.at(-1)).toMatchObject({ type: "error", error: { code: "google_not_found", resumable: false } });
   });
 });

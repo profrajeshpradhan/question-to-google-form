@@ -1,4 +1,5 @@
 import type { CreateEvent } from "@/lib/forms/events";
+import type { FormConfig } from "@/lib/quiz/form-config";
 import type { ValidationIssue } from "@/lib/quiz/types";
 
 export interface RunRequest {
@@ -6,6 +7,7 @@ export interface RunRequest {
   description: string;
   input: string;
   publish: boolean;
+  config: FormConfig;
 }
 
 export type RunOutcome =

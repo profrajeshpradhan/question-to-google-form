@@ -90,9 +90,10 @@ export function Alert({ tone = "info", title, children, className, role, action 
   );
 }
 
-export function Badge({ tone = "brand", children, className }: { tone?: "brand" | "success" | "error" | "neutral"; children: ReactNode; className?: string }) {
+export function Badge({ tone = "brand", children, className }: { tone?: "brand" | "success" | "error" | "neutral" | "warning"; children: ReactNode; className?: string }) {
   const tones = {
     brand: "bg-brand-50 text-brand-700 ring-brand-200",
+    warning: "bg-amber-50 text-amber-800 ring-amber-200",
     success: "bg-success-50 text-success-700 ring-green-200",
     error: "bg-danger-50 text-danger-700 ring-red-200",
     neutral: "bg-gray-50 text-gray-700 ring-gray-200",

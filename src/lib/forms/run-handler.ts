@@ -1,6 +1,7 @@
 import "server-only";
 import type { NextRequest } from "next/server";
 import { getRateLimits } from "@/lib/config";
+import { legacyConfig, reconcileSections, validateFormConfig } from "@/lib/quiz/form-config";
 import { parseQuiz } from "@/lib/quiz/parser";
 import { apiError, requireSessionForMutation } from "@/lib/security/guard";
 import { clientIp, rateLimit } from "@/lib/security/rate-limit";
@@ -61,6 +62,11 @@ export async function handleFormRun(request: NextRequest, formIdParam?: string):
   if (!parsed.ok) {
     return apiError("validation_failed", "Some questions are invalid. Fix them and validate again.", 422, { issues: parsed.errors });
   }
+  const config = body.data.config ?? reconcileSections(legacyConfig(), parsed.quiz.questions.map((q) => q.number));
+  const configIssues = validateFormConfig(config, parsed.quiz).errors;
+  if (configIssues.length > 0) {
+    return apiError("validation_failed", "Some form settings are invalid. Fix them and validate again.", 422, { issues: configIssues });
+  }
 
   const api = createGoogleFormsApi(session.accessToken);
   const encoder = new TextEncoder();
@@ -74,8 +80,8 @@ export async function handleFormRun(request: NextRequest, formIdParam?: string):
         }
       };
       const options = { publish: body.data.publish };
-      if (formId) await resumeQuiz(api, formId, parsed.quiz, options, emit);
-      else await createQuiz(api, parsed.quiz, options, emit);
+      if (formId) await resumeQuiz(api, formId, parsed.quiz, config, options, emit);
+      else await createQuiz(api, parsed.quiz, config, options, emit);
       try {
         controller.close();
       } catch {

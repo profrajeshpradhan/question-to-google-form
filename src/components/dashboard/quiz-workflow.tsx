@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { ExternalIcon, RefreshIcon, WifiOffIcon } from "@/components/ui/icons";
 import { Modal } from "@/components/ui/modal";
 import { Alert, Button, buttonClass } from "@/components/ui/primitives";
@@ -8,6 +8,14 @@ import type { PublicSession } from "@/lib/auth/public-session";
 import { clearDraft, loadDraft, saveDraft, type Draft } from "@/lib/client/draft";
 import { runFormRequest } from "@/lib/client/forms-client";
 import type { CreateEvent, CreateResult } from "@/lib/forms/events";
+import {
+  defaultConfig,
+  questionTemplate,
+  reconcileSections,
+  removeQuestionBlocks,
+  validateFormConfig,
+  type FormConfig,
+} from "@/lib/quiz/form-config";
 import { parseQuiz, SAMPLE_INPUT } from "@/lib/quiz/parser";
 import type { ParseResult, ValidationIssue } from "@/lib/quiz/types";
 import { CreatingStep, initialSteps, type StepMap } from "./creation-steps";
@@ -24,12 +32,15 @@ interface Snapshot {
   description: string;
   input: string;
   parsed: Valid;
+  /** Settings, identification fields and sections, reconciled with the parsed questions and validated. */
+  config: FormConfig;
+  configWarnings: ValidationIssue[];
 }
 
 type Stage =
   | { name: "edit" }
   | { name: "validated"; snap: Snapshot }
-  | { name: "preview"; snap: Snapshot }
+  | { name: "preview"; snap: Snapshot; autoConfirm?: boolean }
   | { name: "creating"; snap: Snapshot; resume: boolean }
   | { name: "success"; snap: Snapshot; result: CreateResult }
   | { name: "failed"; snap: Snapshot; failure: FailureInfo; resume: boolean };
@@ -45,6 +56,7 @@ export function QuizWorkflow({ session }: { session: PublicSession }) {
   const [title, setTitle] = useState(initialDraft?.title ?? "");
   const [description, setDescription] = useState(initialDraft?.description ?? "");
   const [input, setInput] = useState(initialDraft?.input ?? "");
+  const [storedConfig, setConfig] = useState<FormConfig>(() => initialDraft?.config ?? defaultConfig());
   const [pendingForm, setPendingForm] = useState<Draft["pendingForm"]>(initialDraft?.pendingForm);
   const [errors, setErrors] = useState<ValidationIssue[] | null>(null);
   const [stage, setStage] = useState<Stage>({ name: "edit" });
@@ -57,10 +69,22 @@ export function QuizWorkflow({ session }: { session: PublicSession }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const headingRef = useRef<HTMLDivElement>(null);
 
+  // Questions parsed live so they can be arranged into sections while typing.
+  const deferredInput = useDeferredValue(input);
+  const liveQuiz = useMemo(() => {
+    const result = parseQuiz({ input: deferredInput, title: "live" });
+    return result.ok ? result.quiz : null;
+  }, [deferredInput]);
+  const config = useMemo(
+    () => (liveQuiz ? reconcileSections(storedConfig, liveQuiz.questions.map((q) => q.number)) : storedConfig),
+    [storedConfig, liveQuiz],
+  );
+  const updateConfig = useCallback((fn: (c: FormConfig) => FormConfig) => setConfig(fn(config)), [config]);
+
   // Keep the draft in this tab (survives reloads and the Google reconnect redirect).
   useEffect(() => {
-    saveDraft({ title, description, input, pendingForm });
-  }, [title, description, input, pendingForm]);
+    saveDraft({ title, description, input, config: storedConfig, pendingForm });
+  }, [title, description, input, storedConfig, pendingForm]);
 
   // Online/offline state.
   useEffect(() => {
@@ -86,14 +110,32 @@ export function QuizWorkflow({ session }: { session: PublicSession }) {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }, [stage.name]);
 
-  const validate = () => {
+  /** Validates questions and configuration together; on success goes to the chosen screen. */
+  const validate = (next: "validated" | "preview" | "confirm" = "validated") => {
     const result = parseQuiz({ input, title, description });
-    if (!result.ok) {
-      setErrors(result.errors);
+    const reconciled = result.ok ? reconcileSections(config, result.quiz.questions.map((q) => q.number)) : config;
+    const configCheck = validateFormConfig(reconciled, result.ok ? result.quiz : { questions: [] });
+    const allErrors = [...(result.ok ? [] : result.errors), ...configCheck.errors];
+    if (!result.ok || allErrors.length > 0) {
+      setErrors(allErrors);
       return;
     }
     setErrors(null);
-    setStage({ name: "validated", snap: { title, description, input, parsed: result } });
+    setConfig(reconciled);
+    const snap: Snapshot = { title, description, input, parsed: result, config: reconciled, configWarnings: configCheck.warnings };
+    if (next === "validated") setStage({ name: "validated", snap });
+    else setStage({ name: "preview", snap, autoConfirm: next === "confirm" });
+  };
+
+  const insertTemplate = () => {
+    const highest = Math.max(0, ...(liveQuiz?.questions.map((q) => q.number) ?? []));
+    const block = questionTemplate(highest + 1, config.defaults.defaultPoints);
+    setInput((current) => (current.trim() ? `${current.trimEnd()}\n\n${block}` : block));
+    setRestored(false);
+  };
+
+  const discardQuestions = (numbers: number[]) => {
+    if (liveQuiz) setInput((current) => removeQuestionBlocks(current, liveQuiz, numbers));
   };
 
   const jumpToLine = (line: number) => {
@@ -151,7 +193,7 @@ export function QuizWorkflow({ session }: { session: PublicSession }) {
       };
 
       const outcome = await runFormRequest({
-        request: { title: snap.title, description: snap.description, input: snap.input, publish },
+        request: { title: snap.title, description: snap.description, input: snap.input, publish, config: snap.config },
         csrfToken: session.csrfToken,
         resumeFormId,
         onEvent,
@@ -275,6 +317,14 @@ export function QuizWorkflow({ session }: { session: PublicSession }) {
           title={title}
           description={description}
           input={input}
+          config={config}
+          liveQuiz={liveQuiz}
+          onConfig={updateConfig}
+          onPreview={() => validate("preview")}
+          onConvert={() => validate("confirm")}
+          onInsertTemplate={insertTemplate}
+          onDiscardQuestions={discardQuestions}
+          canConvert={online && !expired}
           onTitle={(v) => {
             setTitle(v);
             setRestored(false);
@@ -284,7 +334,7 @@ export function QuizWorkflow({ session }: { session: PublicSession }) {
             setInput(v);
             setRestored(false);
           }}
-          onValidate={validate}
+          onValidate={() => validate()}
           onClear={() => (input || title || description ? setConfirmClear(true) : undefined)}
           onShowExample={() => setShowExample(true)}
           errors={errors}
@@ -296,7 +346,8 @@ export function QuizWorkflow({ session }: { session: PublicSession }) {
         <ValidationStep
           quiz={stage.snap.parsed.quiz}
           summary={stage.snap.parsed.summary}
-          warnings={stage.snap.parsed.warnings}
+          warnings={[...stage.snap.parsed.warnings, ...stage.snap.configWarnings]}
+          config={stage.snap.config}
           sources={stage.snap.parsed.sources}
           onEdit={backToEdit}
           onPreview={() => setStage({ name: "preview", snap: stage.snap })}
@@ -307,6 +358,9 @@ export function QuizWorkflow({ session }: { session: PublicSession }) {
         <PreviewStep
           quiz={stage.snap.parsed.quiz}
           summary={stage.snap.parsed.summary}
+          config={stage.snap.config}
+          warnings={stage.snap.configWarnings}
+          autoConfirm={stage.autoConfirm}
           accountEmail={session.user.email}
           online={online && !expired}
           onEdit={backToEdit}
@@ -319,7 +373,7 @@ export function QuizWorkflow({ session }: { session: PublicSession }) {
 
       {stage.name === "creating" && <CreatingStep steps={steps} resume={stage.resume} />}
 
-      {stage.name === "success" && <SuccessStep result={stage.result} onCreateAnother={resetAll} onBackToEditor={backToEdit} />}
+      {stage.name === "success" && <SuccessStep result={stage.result} config={stage.snap.config} onCreateAnother={resetAll} onBackToEditor={backToEdit} />}
 
       {stage.name === "failed" && (
         <FailureStep

@@ -1,7 +1,8 @@
 import type { forms_v1 } from "@googleapis/forms";
+import type { FormConfig } from "@/lib/quiz/form-config";
 import type { Quiz } from "@/lib/quiz/types";
 import { summarizeQuiz } from "@/lib/quiz/parser";
-import { buildQuestionRequests, buildSettingsRequests, editUrlFor, verifyForm } from "./build-requests";
+import { buildContentRequests, buildSettingsRequests, editUrlFor, emailCollectionTypeFor, normalizeEmailCollectionType, verifyForm, verifyItems } from "./build-requests";
 import { mapGoogleError } from "./errors";
 import type { CreateEvent, CreateFailure, CreateResult, StepId } from "./events";
 
@@ -10,7 +11,8 @@ export interface FormsApi {
   create(title: string): Promise<forms_v1.Schema$Form>;
   batchUpdate(formId: string, requests: forms_v1.Schema$Request[]): Promise<void>;
   get(formId: string): Promise<forms_v1.Schema$Form>;
-  publish(formId: string): Promise<void>;
+  /** Publishes and accepts responses; resolves with the publish state Google reports afterwards. */
+  publish(formId: string): Promise<forms_v1.Schema$PublishSettings | undefined>;
 }
 
 export interface RunOptions {
@@ -31,15 +33,16 @@ class StepFailure extends Error {
  *
  * Order of operations:
  *  1. forms.create (unpublished, so nobody can respond to a half-built form)
- *  2. batchUpdate: enable quiz mode + description
- *  3. batchUpdate: all questions with options, answer keys and points (atomic)
- *  4. forms.get: verify every question, answer key and point value
+ *  2. batchUpdate: quiz mode, email collection + description
+ *  3. batchUpdate: all sections, identification fields and questions with
+ *     options, answer keys and points (atomic)
+ *  4. forms.get: verify every item, answer key, point value and setting
  *  5. forms.setPublishSettings: publish and accept responses (optional)
  *
  * Steps 2–5 never create another form, so a failure after step 1 is reported
  * with the existing form's ID and can be resumed with {@link resumeQuiz}.
  */
-export async function createQuiz(api: FormsApi, quiz: Quiz, options: RunOptions, emit: Emit): Promise<CreateResult | null> {
+export async function createQuiz(api: FormsApi, quiz: Quiz, config: FormConfig, options: RunOptions, emit: Emit): Promise<CreateResult | null> {
   let formId: string | undefined;
   let responderUrl: string | null = null;
 
@@ -52,9 +55,9 @@ export async function createQuiz(api: FormsApi, quiz: Quiz, options: RunOptions,
     responderUrl = created.responderUri ?? null;
     emit({ type: "form", formId, editUrl: editUrlFor(formId) });
 
-    await step(emit, "quiz", formId, () => api.batchUpdate(formId!, buildSettingsRequests(quiz)));
-    await step(emit, "questions", formId, () => api.batchUpdate(formId!, buildQuestionRequests(quiz)));
-    return await finish(api, quiz, options, emit, formId, responderUrl);
+    await step(emit, "quiz", formId, () => api.batchUpdate(formId!, buildSettingsRequests(quiz, config)));
+    await step(emit, "questions", formId, () => api.batchUpdate(formId!, buildContentRequests(quiz, config)));
+    return await finish(api, quiz, config, options, emit, formId, responderUrl);
   } catch (error) {
     emitFailure(emit, error, formId, responderUrl);
     return null;
@@ -63,21 +66,19 @@ export async function createQuiz(api: FormsApi, quiz: Quiz, options: RunOptions,
 
 /**
  * Continues a partially created quiz on the SAME form (no duplicate is created).
- * Only proceeds when the form is empty or already exactly matches the quiz.
+ * Only proceeds when the form has no items or its items already exactly match.
  */
-export async function resumeQuiz(api: FormsApi, formId: string, quiz: Quiz, options: RunOptions, emit: Emit): Promise<CreateResult | null> {
+export async function resumeQuiz(api: FormsApi, formId: string, quiz: Quiz, config: FormConfig, options: RunOptions, emit: Emit): Promise<CreateResult | null> {
   let responderUrl: string | null = null;
   try {
     const form = await step(emit, "create", formId, () => api.get(formId));
     responderUrl = form.responderUri ?? null;
     emit({ type: "form", formId, editUrl: editUrlFor(formId) });
 
-    const questionItems = (form.items ?? []).filter((item) => item.questionItem);
-    const hasOtherItems = (form.items ?? []).length !== questionItems.length;
-    const contentMatches = questionItems.length > 0 && !hasOtherItems
-      && verifyForm({ ...form, settings: { quizSettings: { isQuiz: true } }, info: { ...form.info, description: quiz.description } }, quiz).length === 0;
+    const items = form.items ?? [];
+    const contentMatches = items.length > 0 && verifyItems(items, quiz, config).length === 0;
 
-    if ((questionItems.length > 0 && !contentMatches) || hasOtherItems) {
+    if (items.length > 0 && !contentMatches) {
       throw new StepFailure({
         code: "resume_unsafe",
         message: "This form already contains questions that differ from your input, so it cannot be completed automatically. Open it in Google Forms to finish it, or delete it and create a new form.",
@@ -89,15 +90,18 @@ export async function resumeQuiz(api: FormsApi, formId: string, quiz: Quiz, opti
       });
     }
 
-    const settingsOk = form.settings?.quizSettings?.isQuiz === true && (form.info?.description ?? "") === quiz.description;
+    const settingsOk =
+      Boolean(form.settings?.quizSettings?.isQuiz) === config.quiz.isQuiz &&
+      normalizeEmailCollectionType(form.settings?.emailCollectionType) === emailCollectionTypeFor(config) &&
+      (form.info?.description ?? "") === quiz.description;
     if (settingsOk) emit({ type: "step", step: "quiz", status: "skipped" });
-    else await step(emit, "quiz", formId, () => api.batchUpdate(formId, buildSettingsRequests(quiz)));
+    else await step(emit, "quiz", formId, () => api.batchUpdate(formId, buildSettingsRequests(quiz, config)));
 
     if (contentMatches) emit({ type: "step", step: "questions", status: "skipped" });
-    else await step(emit, "questions", formId, () => api.batchUpdate(formId, buildQuestionRequests(quiz)));
+    else await step(emit, "questions", formId, () => api.batchUpdate(formId, buildContentRequests(quiz, config)));
 
     const alreadyPublished = form.publishSettings?.publishState?.isPublished === true;
-    return await finish(api, quiz, { publish: options.publish && !alreadyPublished }, emit, formId, responderUrl, alreadyPublished);
+    return await finish(api, quiz, config, { publish: options.publish && !alreadyPublished }, emit, formId, responderUrl, alreadyPublished);
   } catch (error) {
     emitFailure(emit, error, formId, responderUrl);
     return null;
@@ -107,6 +111,7 @@ export async function resumeQuiz(api: FormsApi, formId: string, quiz: Quiz, opti
 async function finish(
   api: FormsApi,
   quiz: Quiz,
+  config: FormConfig,
   options: RunOptions,
   emit: Emit,
   formId: string,
@@ -114,13 +119,13 @@ async function finish(
   alreadyPublished = false,
 ): Promise<CreateResult> {
   const fetched = await step(emit, "verify", formId, () => api.get(formId), false);
-  const problems = verifyForm(fetched, quiz);
+  const problems = verifyForm(fetched, quiz, config);
   const responderUrl = fetched.responderUri ?? initialResponderUrl;
   if (problems.length > 0) {
     emit({ type: "step", step: "verify", status: "failed" });
     throw new StepFailure({
       code: "verification_failed",
-      message: "The form was created, but Google returned content that does not match your questions. It has not been published.",
+      message: "The form was created, but Google returned content or settings that do not match what you approved. It has not been published.",
       step: "verify",
       formId,
       editUrl: editUrlFor(formId),
@@ -133,7 +138,21 @@ async function finish(
 
   let published = alreadyPublished;
   if (options.publish) {
-    await step(emit, "publish", formId, () => api.publish(formId));
+    const state = await step(emit, "publish", formId, () => api.publish(formId), false);
+    // Confirm with Google's reported state instead of assuming the call took effect.
+    if (state?.publishState?.isPublished !== true || state.publishState.isAcceptingResponses !== true) {
+      emit({ type: "step", step: "publish", status: "failed" });
+      throw new StepFailure({
+        code: "verification_failed",
+        message: "Google accepted the publish request, but the form is not reported as published. Open it in Google Forms and click Publish.",
+        step: "publish",
+        formId,
+        editUrl: editUrlFor(formId),
+        responderUrl,
+        resumable: true,
+      });
+    }
+    emit({ type: "step", step: "publish", status: "done" });
     published = true;
   } else {
     emit({ type: "step", step: "publish", status: "skipped" });
@@ -148,6 +167,8 @@ async function finish(
     published,
     questionCount: summary.questionCount,
     totalMarks: summary.totalMarks,
+    sectionCount: config.sections.length,
+    fieldCount: config.fields.length,
   };
   emit({ type: "result", result });
   return result;

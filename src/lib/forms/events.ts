@@ -8,8 +8,8 @@ export type StepId = "create" | "quiz" | "questions" | "verify" | "publish";
 
 export const STEP_LABELS: Record<StepId, string> = {
   create: "Creating form",
-  quiz: "Enabling quiz mode",
-  questions: "Adding questions, answer keys and marks",
+  quiz: "Applying quiz and response settings",
+  questions: "Adding sections, student fields, questions, answer keys and marks",
   verify: "Verifying the result",
   publish: "Publishing the form",
 };
@@ -27,6 +27,9 @@ export interface CreateResult {
   published: boolean;
   questionCount: number;
   totalMarks: number;
+  sectionCount: number;
+  /** Student identification fields created. */
+  fieldCount: number;
 }
 
 export type FailureCode =

@@ -50,7 +50,20 @@ export type IssueCode =
   | "MARKS_TOO_HIGH"
   | "MISSING_TITLE"
   | "TITLE_TOO_LONG"
-  | "DESCRIPTION_TOO_LONG";
+  | "DESCRIPTION_TOO_LONG"
+  // Form configuration (identification fields, sections, settings)
+  | "CONFIG_TOO_LONG"
+  | "FIELD_LIMIT"
+  | "FIELD_LABEL_MISSING"
+  | "FIELD_LABEL_DUPLICATE"
+  | "FIELD_OPTIONS"
+  | "FIELD_VALIDATION"
+  | "SECTION_LIMIT"
+  | "SECTION_TITLE"
+  | "SECTION_EMPTY"
+  | "SECTION_ASSIGNMENT"
+  | "QUIZ_OFF"
+  | "SETTING_CONFLICT";
 
 export interface ValidationIssue {
   code: IssueCode;
@@ -59,6 +72,8 @@ export interface ValidationIssue {
   question?: number;
   /** 1-based line number in the pasted input. */
   line?: number;
+  /** Configuration area the issue belongs to (absent for question-text issues). */
+  area?: "details" | "identification" | "sections" | "settings";
   severity: "error" | "warning";
 }
 

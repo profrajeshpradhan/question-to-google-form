@@ -1,5 +1,6 @@
 // Local stand-in for the Google Forms REST API, used ONLY by the Playwright tests.
-// It implements the four endpoints the app calls and applies batchUpdate requests
+// It implements the four endpoints the app calls (including sections, text items
+// and email collection) and applies batchUpdate requests
 // the way Google does, so the app's real verification logic runs against it.
 //
 // Failure modes are triggered by markers in the form title:
@@ -38,6 +39,7 @@ const server = http.createServer(async (req, res) => {
   const path = url.pathname;
 
   if (path === "/__stats") return send(res, 200, stats);
+  if (path === "/__last") return send(res, 200, publicView([...forms.values()].at(-1) ?? {}));
   if (path === "/__reset") {
     forms.clear();
     stats = { creates: 0, batchUpdates: 0, gets: 0, publishes: 0 };
@@ -90,27 +92,48 @@ const server = http.createServer(async (req, res) => {
         form._failQuestions = false; // fail once, then let "Finish this form" succeed
         return send(res, 503, googleError(503, "UNAVAILABLE", "The service is currently unavailable."));
       }
+      // batchUpdate is atomic: a rejected sub-request leaves the form unchanged.
+      const before = structuredClone({ settings: form.settings, info: form.info, items: form.items });
+      const reject = (message) => {
+        Object.assign(form, before);
+        return send(res, 400, googleError(400, "INVALID_ARGUMENT", message));
+      };
       for (const r of requests) {
         if (r.updateSettings) {
-          if (r.updateSettings.updateMask !== "quizSettings.isQuiz") return send(res, 400, googleError(400, "INVALID_ARGUMENT", "bad mask"));
-          form.settings = { ...form.settings, quizSettings: { isQuiz: Boolean(r.updateSettings.settings?.quizSettings?.isQuiz) } };
+          const mask = r.updateSettings.updateMask.split(",");
+          if (mask.some((m) => m !== "quizSettings.isQuiz" && m !== "emailCollectionType")) return reject("bad mask");
+          const settings = r.updateSettings.settings ?? {};
+          if (mask.includes("quizSettings.isQuiz")) form.settings = { ...form.settings, quizSettings: { isQuiz: Boolean(settings.quizSettings?.isQuiz) } };
+          if (mask.includes("emailCollectionType")) {
+            if (!["DO_NOT_COLLECT", "VERIFIED", "RESPONDER_INPUT"].includes(settings.emailCollectionType)) {
+              return reject("Invalid emailCollectionType");
+            }
+            // Like Google, "do not collect" is reported by omitting the field.
+            form.settings = { ...form.settings, emailCollectionType: settings.emailCollectionType === "DO_NOT_COLLECT" ? undefined : settings.emailCollectionType };
+          }
         } else if (r.updateFormInfo) {
           form.info = { ...form.info, description: r.updateFormInfo.info?.description };
         } else if (r.createItem) {
           const item = r.createItem.item;
           const q = item.questionItem?.question;
           if (q?.grading && !form.settings?.quizSettings?.isQuiz) {
-            return send(res, 400, googleError(400, "INVALID_ARGUMENT", "Grading requires quiz mode"));
+            return reject("Grading requires quiz mode");
           }
           if (q?.grading && !Number.isInteger(q.grading.pointValue)) {
-            return send(res, 400, googleError(400, "INVALID_ARGUMENT", "pointValue must be an integer"));
+            return reject("pointValue must be an integer");
           }
           const values = q?.choiceQuestion?.options?.map((o) => o.value) ?? [];
-          if (new Set(values).size !== values.length) return send(res, 400, googleError(400, "INVALID_ARGUMENT", "Duplicate option values"));
-          form.items.splice(r.createItem.location.index, 0, {
+          if (new Set(values).size !== values.length) return reject("Duplicate option values");
+          const kinds = ["questionItem", "textItem", "pageBreakItem"].filter((k) => item[k]);
+          if (kinds.length !== 1) return reject("Item must have exactly one kind");
+          const index = r.createItem.location?.index;
+          if (!Number.isInteger(index) || index < 0 || index > form.items.length) {
+            return reject("Invalid location index");
+          }
+          form.items.splice(index, 0, {
             itemId: `item${form.items.length}`,
             ...item,
-            questionItem: { question: { questionId: `q${form.items.length}`, ...q } },
+            ...(q ? { questionItem: { question: { questionId: `q${form.items.length}`, ...q } } } : {}),
           });
         }
       }

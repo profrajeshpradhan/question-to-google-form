@@ -2,6 +2,7 @@
 
 import { ArrowRightIcon, CheckCircleIcon } from "@/components/ui/icons";
 import { Alert, Button, Card } from "@/components/ui/primitives";
+import type { FormConfig } from "@/lib/quiz/form-config";
 import type { Quiz, QuizSummary, ValidationIssue } from "@/lib/quiz/types";
 
 export function marksLabel(marks: number) {
@@ -13,9 +14,11 @@ export function ValidationStep({
   summary,
   warnings,
   sources,
+  config,
   onEdit,
   onPreview,
 }: {
+  config: FormConfig;
   quiz: Quiz;
   summary: QuizSummary;
   warnings: ValidationIssue[];
@@ -47,6 +50,11 @@ export function ValidationStep({
           </div>
         ))}
       </dl>
+
+      <p className="mt-3 text-sm text-muted" data-testid="structure-summary">
+        {config.sections.length} {config.sections.length === 1 ? "section" : "sections"} <span aria-hidden="true">·</span> {config.fields.length}{" "}
+        student identification {config.fields.length === 1 ? "field" : "fields"} <span aria-hidden="true">·</span> Settings are summarised in the preview.
+      </p>
 
       {(sources.title === "input" || sources.description === "input") && (
         <p className="mt-4 text-sm text-muted">

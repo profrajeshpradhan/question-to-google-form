@@ -37,10 +37,33 @@ API routes:
 ### Form creation sequence (`src/lib/forms/forms-service.ts`)
 
 1. `forms.create` with `unpublished=true`. Only `info.title`/`documentTitle` are accepted at creation.
-2. `forms.batchUpdate`: `updateSettings` (`quizSettings.isQuiz`, mask `quizSettings.isQuiz`) + `updateFormInfo` (mask `description`).
-3. `forms.batchUpdate`: one `createItem` per question at explicit indices. Each is a required `RADIO` choice question with `grading.pointValue` (integer) and one `correctAnswers` value. A batch is atomic.
-4. `forms.get`: verifies quiz mode, description, question text, options, answer key and points for every question. If anything differs, the app reports a failure and does **not** publish.
-5. `forms.setPublishSettings` (`publishState.isPublished` + `isAcceptingResponses`, mask `publishState`). Optional: the teacher can keep an unpublished draft.
+2. `forms.batchUpdate`: `updateSettings` (`quizSettings.isQuiz` + `emailCollectionType`, mask `quizSettings.isQuiz,emailCollectionType`) + `updateFormInfo` (mask `description`).
+3. `forms.batchUpdate`: one `createItem` per item at explicit increasing indices, in respondent order (`planItems` in `src/lib/forms/build-requests.ts`): optional *Instructions* `textItem`; the first section's heading as a `textItem` (only when there are several sections or it has a description, because Google shows the form title above section 1); a `pageBreakItem` (title + description) before every later section; identification fields as `textQuestion` / `DROP_DOWN` / `RADIO` questions without grading; MCQs as `RADIO` questions with `grading.pointValue` and one `correctAnswers` value (grading is omitted when quiz mode is off). A batch is atomic.
+4. `forms.get`: verifies quiz mode, email collection, description and every item (kind, title, description, required, options, answer key, points) in order. If anything differs, the app reports a failure and does **not** publish.
+5. `forms.setPublishSettings` (`publishState.isPublished` + `isAcceptingResponses`, mask `publishState`). Success is reported only if the publish state Google returns says the form is published and accepting responses. Optional: the teacher can keep an unpublished draft.
+
+The preview (`buildFormPlan` in `src/lib/quiz/form-plan.ts`) and the request builder use the same plan, so the teacher approves exactly what is created.
+
+### Settings capability matrix (verified 29 Oct 2026 against the Forms API v1 REST reference)
+
+| Setting | API support | Scope | What the app does |
+|---|---|---|---|
+| Quiz mode | `settings.quizSettings.isQuiz` | `drive.file` | Applied and verified |
+| Answer keys, point values | `Question.grading` | `drive.file` | Applied and verified |
+| Required questions/fields | `Question.required` | `drive.file` | Applied and verified |
+| Sections (title, description) | `Item.pageBreakItem` | `drive.file` | Applied and verified |
+| Short answer / dropdown / multiple choice fields | `textQuestion`, `choiceQuestion` | `drive.file` | Applied and verified |
+| Collect email addresses (Verified / Responder input / Do not collect) | `settings.emailCollectionType` | `drive.file` | Applied and verified |
+| Publish + accept responses | `forms.setPublishSettings` | `drive.file` | Applied and verified |
+| Response validation (number, email, length, regex) | None (`TextQuestion` has only `paragraph`) | — | Created as short answer; validation listed as a manual step |
+| Release grades (immediately / later) | None | — | Manual step |
+| Respondent sees missed questions / correct answers / point values | None | — | Manual step |
+| Send respondents a copy, allow response editing, limit to 1 response | None | — | Manual step |
+| Shuffle question order, progress bar, confirmation message | None | — | Listed as unavailable; no controls |
+| Global Google Forms defaults | None | — | Not changed; settings are per form |
+| Who can respond (sharing) | Drive permissions API | broader Drive scope | Not requested; disclosed |
+
+Manual steps are shown before creation (preview *Settings summary*) and as a checklist with the exact Google Forms path after creation. They are never reported as applied.
 
 The edit link uses Google's documented format `https://docs.google.com/forms/d/{formId}/edit`. The respondent link is Google's `responderUri`.
 
@@ -188,8 +211,9 @@ Use a dedicated Google test account that is listed as a test user:
 1. `npm run dev` with real credentials in `.env.local` (`APP_BASE_URL=http://localhost:3000`).
 2. Sign in, paste the sample (*View Format Example → Insert example*), validate, preview and confirm.
 3. In the created form, check: *Settings → Make this a quiz* is on; each question has the correct answer key and points; the total is right; the form is published; and the respondent link opens.
-4. Test denial: sign in and click *Cancel* on Google's consent screen → you should see "Sign-in was cancelled".
-5. Test revocation: remove the app at <https://myaccount.google.com/connections>, then try to create a form → you should see "Please reconnect your Google account".
+4. Repeat with Student Identification fields, two or more sections and *Collect email addresses → Verified*. Check that the sections appear as separate pages in order, the fields come first with the right required flags, and *Settings → Responses → Collect email addresses* shows *Verified*.
+5. Test denial: sign in and click *Cancel* on Google's consent screen → you should see "Sign-in was cancelled".
+6. Test revocation: remove the app at <https://myaccount.google.com/connections>, then try to create a form → you should see "Please reconnect your Google account".
 
 ---
 

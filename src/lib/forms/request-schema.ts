@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { formConfigSchema } from "@/lib/quiz/form-config";
 import { LIMITS } from "@/lib/quiz/limits";
 
 /** Body for POST /api/forms and POST /api/forms/:formId/resume. The raw text is re-parsed on the server. */
@@ -7,6 +8,8 @@ export const createFormRequestSchema = z.object({
   description: z.string().max(LIMITS.maxDescriptionChars * 2).default(""),
   input: z.string().min(1).max(LIMITS.maxInputChars),
   publish: z.boolean().default(true),
+  /** Sections, identification fields and settings. Older clients omit it (legacy single-section quiz). */
+  config: formConfigSchema.optional(),
 });
 
 export type CreateFormRequest = z.infer<typeof createFormRequestSchema>;
@@ -14,4 +17,4 @@ export type CreateFormRequest = z.infer<typeof createFormRequestSchema>;
 /** Google form IDs are URL-safe base64-like strings. */
 export const formIdSchema = z.string().regex(/^[A-Za-z0-9_-]{10,200}$/);
 
-export const MAX_REQUEST_BYTES = LIMITS.maxInputChars * 4 + 64_000;
+export const MAX_REQUEST_BYTES = LIMITS.maxInputChars * 4 + 300_000;

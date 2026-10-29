@@ -1,4 +1,6 @@
 import type { forms_v1 } from "@googleapis/forms";
+import type { EmailCollection, FormConfig, IdField } from "@/lib/quiz/form-config";
+import { buildFormPlan, firstSectionHasHeading } from "@/lib/quiz/form-plan";
 import type { Quiz, QuizOption, QuizQuestion } from "@/lib/quiz/types";
 
 /** Text shown for each option in Google Forms, e.g. "A. Central Processing Unit". */
@@ -17,13 +19,32 @@ export function editUrlFor(formId: string): string {
   return `https://docs.google.com/forms/d/${encodeURIComponent(formId)}/edit`;
 }
 
-/** Step 2: turn the form into a quiz and set the description (applied atomically). */
-export function buildSettingsRequests(quiz: Quiz): forms_v1.Schema$Request[] {
+const EMAIL_COLLECTION_TYPES: Record<EmailCollection, string> = {
+  verified: "VERIFIED",
+  responder_input: "RESPONDER_INPUT",
+  do_not_collect: "DO_NOT_COLLECT",
+};
+
+export function emailCollectionTypeFor(config: FormConfig): string {
+  return EMAIL_COLLECTION_TYPES[config.responses.emailCollection];
+}
+
+/** Google omits the field (or reports UNSPECIFIED) when emails are not collected. */
+export function normalizeEmailCollectionType(value: string | null | undefined): string {
+  return !value || value === "EMAIL_COLLECTION_TYPE_UNSPECIFIED" ? "DO_NOT_COLLECT" : value;
+}
+
+/**
+ * Step 2: quiz mode, email collection and description (applied atomically).
+ * These are the only form-level settings the Forms API exposes; everything else
+ * in Google Forms → Settings must be set by the teacher (see describeSettings).
+ */
+export function buildSettingsRequests(quiz: Quiz, config: FormConfig): forms_v1.Schema$Request[] {
   const requests: forms_v1.Schema$Request[] = [
     {
       updateSettings: {
-        settings: { quizSettings: { isQuiz: true } },
-        updateMask: "quizSettings.isQuiz",
+        settings: { quizSettings: { isQuiz: config.quiz.isQuiz }, emailCollectionType: emailCollectionTypeFor(config) },
+        updateMask: "quizSettings.isQuiz,emailCollectionType",
       },
     },
   ];
@@ -38,33 +59,72 @@ export function buildSettingsRequests(quiz: Quiz): forms_v1.Schema$Request[] {
   return requests;
 }
 
-/**
- * Step 3: one createItem per question, each a required single-answer (RADIO)
- * question with its answer key and point value. Items are inserted at explicit
- * increasing indices so the order matches the teacher's input.
- */
-export function buildQuestionRequests(quiz: Quiz): forms_v1.Schema$Request[] {
-  return quiz.questions.map((question, index) => ({
-    createItem: {
-      item: {
-        title: question.text,
-        questionItem: {
-          question: {
-            required: true,
-            choiceQuestion: {
-              type: "RADIO",
-              options: question.options.map((option) => ({ value: optionValue(option) })),
-            },
-            grading: {
-              pointValue: question.marks,
-              correctAnswers: { answers: [{ value: correctOptionValue(question) }] },
-            },
-          },
+/** One item to create, with a teacher-facing label for verification messages. */
+export interface PlannedItem {
+  label: string;
+  /** Question number, for MCQs. */
+  question?: number;
+  item: forms_v1.Schema$Item;
+}
+
+function withDescription(item: forms_v1.Schema$Item, description: string): forms_v1.Schema$Item {
+  return description ? { ...item, description } : item;
+}
+
+function fieldItem(field: IdField): forms_v1.Schema$Item {
+  // Number and email fields are short-answer questions: the Forms API cannot set
+  // response validation, so leading zeros and "+91" prefixes are kept as typed.
+  const question: forms_v1.Schema$Question =
+    field.type === "dropdown" || field.type === "choice"
+      ? { required: field.required, choiceQuestion: { type: field.type === "dropdown" ? "DROP_DOWN" : "RADIO", options: field.options.map((value) => ({ value })) } }
+      : { required: field.required, textQuestion: { paragraph: false } };
+  return withDescription({ title: field.label, questionItem: { question } }, field.description);
+}
+
+function mcqItem(question: QuizQuestion, config: FormConfig): forms_v1.Schema$Item {
+  return {
+    title: question.text,
+    questionItem: {
+      question: {
+        required: config.defaults.required,
+        choiceQuestion: {
+          type: "RADIO",
+          options: question.options.map((option) => ({ value: optionValue(option) })),
         },
+        ...(config.quiz.isQuiz
+          ? { grading: { pointValue: question.marks, correctAnswers: { answers: [{ value: correctOptionValue(question) }] } } }
+          : {}),
       },
-      location: { index },
     },
-  }));
+  };
+}
+
+/**
+ * Every item in respondent order: optional instructions, then each section.
+ * Sections after the first start with a page break (Google Forms' section
+ * header); the first section shares the page with the form title.
+ */
+export function planItems(quiz: Quiz, config: FormConfig): PlannedItem[] {
+  const plan = buildFormPlan(quiz, config);
+  const items: PlannedItem[] = [];
+  if (plan.instructions) items.push({ label: "Instructions", item: { title: "Instructions", description: plan.instructions, textItem: {} } });
+  plan.sections.forEach((section, index) => {
+    const label = `Section “${section.title}”`;
+    if (index > 0) items.push({ label, item: withDescription({ title: section.title, pageBreakItem: {} }, section.description) });
+    else if (firstSectionHasHeading(plan)) items.push({ label, item: withDescription({ title: section.title, textItem: {} }, section.description) });
+    for (const field of section.fields) items.push({ label: `Field “${field.label}”`, item: fieldItem(field) });
+    for (const question of section.questions) items.push({ label: `Q${question.number}`, question: question.number, item: mcqItem(question, config) });
+  });
+  return items;
+}
+
+/**
+ * Step 3: one createItem per planned item at explicit increasing indices
+ * (sub-requests apply in order, so index i is always valid). One batchUpdate
+ * means the whole structure is written atomically or not at all.
+ */
+export function buildContentRequests(quiz: Quiz, config: FormConfig): forms_v1.Schema$Request[] {
+  return planItems(quiz, config).map(({ item }, index) => ({ createItem: { item, location: { index } } }));
 }
 
 export interface VerificationProblem {
@@ -72,30 +132,63 @@ export interface VerificationProblem {
   message: string;
 }
 
-/** Compares the form returned by forms.get with the quiz the teacher approved. */
-export function verifyForm(form: forms_v1.Schema$Form, quiz: Quiz): VerificationProblem[] {
+function kindOf(item: forms_v1.Schema$Item): string {
+  if (item.pageBreakItem) return "section";
+  if (item.textItem) return "heading";
+  if (item.questionItem?.question?.textQuestion) return "short answer";
+  const type = item.questionItem?.question?.choiceQuestion?.type;
+  if (type === "RADIO") return "multiple choice";
+  if (type === "DROP_DOWN") return "dropdown";
+  return item.questionItem ? "other question" : "other item";
+}
+
+/** Compares the form returned by forms.get with the structure the teacher approved. */
+export function verifyForm(form: forms_v1.Schema$Form, quiz: Quiz, config: FormConfig): VerificationProblem[] {
   const problems: VerificationProblem[] = [];
-  if (!form.settings?.quizSettings?.isQuiz) problems.push({ message: "Quiz mode is not enabled." });
-  if ((form.info?.description ?? "") !== quiz.description) problems.push({ message: "The form description does not match." });
-
-  const items = (form.items ?? []).filter((item) => item.questionItem);
-  if (items.length !== quiz.questions.length) {
-    problems.push({ message: `Expected ${quiz.questions.length} questions but the form has ${items.length}.` });
-    return problems;
+  if (Boolean(form.settings?.quizSettings?.isQuiz) !== config.quiz.isQuiz) {
+    problems.push({ message: config.quiz.isQuiz ? "Quiz mode is not enabled." : "Quiz mode should be off." });
   }
+  if (normalizeEmailCollectionType(form.settings?.emailCollectionType) !== emailCollectionTypeFor(config)) {
+    problems.push({ message: "The email collection setting does not match." });
+  }
+  if ((form.info?.description ?? "") !== quiz.description) problems.push({ message: "The form description does not match." });
+  problems.push(...verifyItems(form.items ?? [], quiz, config));
+  return problems;
+}
 
-  quiz.questions.forEach((question, index) => {
-    const item = items[index];
-    const q = item.questionItem?.question;
-    const fail = (message: string) => problems.push({ question: question.number, message });
-    if ((item.title ?? "") !== question.text) fail("Question text does not match.");
-    if (q?.choiceQuestion?.type !== "RADIO") fail("Question is not a multiple-choice question.");
-    const values = (q?.choiceQuestion?.options ?? []).map((o) => o.value ?? "");
-    const expected = question.options.map(optionValue);
-    if (values.length !== expected.length || values.some((v, i) => v !== expected[i])) fail("Options do not match.");
-    if (q?.grading?.pointValue !== question.marks) fail(`Marks should be ${question.marks}.`);
-    const answers = (q?.grading?.correctAnswers?.answers ?? []).map((a) => a.value);
-    if (answers.length !== 1 || answers[0] !== correctOptionValue(question)) fail("Correct answer does not match.");
+export function verifyItems(actualItems: forms_v1.Schema$Item[], quiz: Quiz, config: FormConfig): VerificationProblem[] {
+  const expectedItems = planItems(quiz, config);
+  if (actualItems.length !== expectedItems.length) {
+    return [{ message: `Expected ${expectedItems.length} items (sections, fields and questions) but the form has ${actualItems.length}.` }];
+  }
+  const problems: VerificationProblem[] = [];
+  expectedItems.forEach(({ label, question, item: expected }, index) => {
+    const actual = actualItems[index];
+    const fail = (message: string) => problems.push(question !== undefined ? { question, message } : { message: `${label}: ${message}` });
+    if (kindOf(actual) !== kindOf(expected)) {
+      fail(`Expected a ${kindOf(expected)} item but found a ${kindOf(actual)} item.`);
+      return;
+    }
+    if ((actual.title ?? "") !== (expected.title ?? "")) fail(question !== undefined ? "Question text does not match." : "Title does not match.");
+    if ((actual.description ?? "") !== (expected.description ?? "")) fail("Description does not match.");
+
+    const e = expected.questionItem?.question;
+    if (!e) return;
+    const a = actual.questionItem?.question;
+    if (Boolean(a?.required) !== Boolean(e.required)) fail(e.required ? "Should be required." : "Should be optional.");
+    if (e.choiceQuestion) {
+      const values = (a?.choiceQuestion?.options ?? []).map((o) => o.value ?? "");
+      const wanted = (e.choiceQuestion.options ?? []).map((o) => o.value ?? "");
+      if (values.length !== wanted.length || values.some((v, i) => v !== wanted[i])) fail("Options do not match.");
+    }
+    if (e.grading) {
+      if (a?.grading?.pointValue !== e.grading.pointValue) fail(`Marks should be ${e.grading.pointValue}.`);
+      const answers = (a?.grading?.correctAnswers?.answers ?? []).map((x) => x.value);
+      const key = e.grading.correctAnswers?.answers?.[0]?.value;
+      if (answers.length !== 1 || answers[0] !== key) fail("Correct answer does not match.");
+    } else if (a?.grading?.pointValue || a?.grading?.correctAnswers?.answers?.length) {
+      fail("Should not be graded.");
+    }
   });
   return problems;
 }
