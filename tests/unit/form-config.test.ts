@@ -9,15 +9,13 @@ import {
   addSection,
   blankField,
   defaultConfig,
-  describeSettings,
   duplicateField,
-  FIELD_PRESETS,
-  manualSteps,
+  FIELD_TYPES,
+  legacyConfig,
   moveField,
   moveQuestionToSection,
   moveQuestionWithinSection,
   moveSection,
-  newId,
   questionTemplate,
   reconcileSections,
   removeField,
@@ -26,8 +24,9 @@ import {
   updateField,
   updateSection,
   validateFormConfig,
+  formConfigSchema,
+  withFixedSettings,
   type FormConfig,
-  type IdField,
 } from "@/lib/quiz/form-config";
 import { buildFormPlan } from "@/lib/quiz/form-plan";
 import { parseQuiz } from "@/lib/quiz/parser";
@@ -44,88 +43,103 @@ function quiz(input = INPUT): Quiz {
 }
 
 const numbers = (q: Quiz) => q.questions.map((x) => x.number);
-const preset = (name: string): IdField => ({ ...structuredClone(FIELD_PRESETS.find((p) => p.name === name)!.field), id: newId() });
+const fresh = () => reconcileSections(defaultConfig(), [1, 2, 3, 4]);
 
-/** Student Details (Enrollment, Name, Mobile) + two assessment sections. */
-function examConfig(q = quiz()): FormConfig {
-  let config = reconcileSections(defaultConfig(), numbers(q));
-  config = addField(config, preset("Enrollment No."));
-  config = addField(config, preset("Student Name"));
-  config = addField(config, preset("Mobile No."));
-  config = addSection(config);
-  const second = config.sections.at(-1)!.id;
-  config = moveQuestionToSection(config, 3, second);
-  config = moveQuestionToSection(config, 4, second);
-  return updateSection(config, second, { title: "Part B", description: "Answer all." });
+/** The default two sections plus a third section "Part B" holding Q3 and Q4. */
+function examConfig(): FormConfig {
+  let config = addSection(fresh());
+  const third = config.sections.at(-1)!.id;
+  config = moveQuestionToSection(config, 3, third);
+  config = moveQuestionToSection(config, 4, third);
+  return updateSection(config, third, { title: "Part B", description: "Answer all." });
 }
 
 describe("defaults", () => {
-  it("match the specification", () => {
+  it("every new form starts with exactly two sections: Student Identification, then Questions", () => {
+    const config = defaultConfig();
+    expect(config.sections.map((s) => [s.kind, s.title])).toEqual([
+      ["details", "Student Identification"],
+      ["questions", "Questions"],
+    ]);
+    expect(config.fields.map((f) => [f.label, f.type, f.required])).toEqual([
+      ["Enrollment No.", "short", true],
+      ["Student Name (as per university records)", "short", true],
+      ["Mobile No.", "short", false],
+    ]);
+  });
+
+  it("uses the fixed version-one settings", () => {
     const config = defaultConfig();
     expect(config.quiz).toEqual({ isQuiz: true, releaseGrades: "later", showMissed: false, showCorrect: false, showPoints: false });
     expect(config.responses).toEqual({ emailCollection: "verified", sendCopy: "off", allowEditing: false, limitOneResponse: true });
     expect(config.defaults).toEqual({ required: true, defaultPoints: 1 });
-    expect(config.fields).toEqual([]);
-    expect(config.sections).toHaveLength(1);
+    // Drafts saved by an older version with edited settings get the fixed settings back.
+    const edited = { ...config, quiz: { ...config.quiz, isQuiz: false }, responses: { ...config.responses, emailCollection: "do_not_collect" as const } };
+    expect(withFixedSettings(edited).quiz.isQuiz).toBe(true);
+    expect(withFixedSettings(edited).responses.emailCollection).toBe("verified");
   });
 
-  it("puts every parsed question in the single default section in text order", () => {
-    const config = reconcileSections(defaultConfig(), [1, 2, 3, 4]);
-    expect(config.sections[0].questions).toEqual([1, 2, 3, 4]);
+  it("puts every parsed question into the Questions section in text order", () => {
+    const config = fresh();
+    expect(config.sections[1].questions).toEqual([1, 2, 3, 4]);
     expect(validateFormConfig(config, quiz()).errors).toEqual([]);
   });
 
-  it("the default point value is used for new question templates, and imported MARKS override it", () => {
-    const template = questionTemplate(1, 3);
-    expect(template).toContain("MARKS: 3");
-    const parsed = parseQuiz({ input: template.replace("MARKS: 3", "MARKS: 5"), title: "t" });
-    expect(parsed.ok && parsed.quiz.questions[0].marks).toBe(5);
-    const config = { ...reconcileSections(defaultConfig(), [1]), defaults: { required: true, defaultPoints: 1 } };
-    const request = buildContentRequests(parsed.ok ? parsed.quiz : quiz(), config)[0];
+  it("question templates use 1 mark, and imported MARKS always win", () => {
+    const template = questionTemplate(1, defaultConfig().defaults.defaultPoints);
+    expect(template).toContain("MARKS: 1");
+    const parsed = parseQuiz({ input: template.replace("MARKS: 1", "MARKS: 5"), title: "t" });
+    if (!parsed.ok) throw new Error("template should parse");
+    const request = buildContentRequests(parsed.quiz, reconcileSections(legacyConfig(), [1]))[0];
     expect(request.createItem?.item?.questionItem?.question?.grading?.pointValue).toBe(5);
+  });
+
+  it("preserves option order exactly as pasted", () => {
+    const mcq = planItems(quiz(), fresh()).find((i) => i.question === 1)!.item;
+    expect(mcq.questionItem?.question?.choiceQuestion?.options).toEqual([{ value: "A. Yes 1" }, { value: "B. No 1" }]);
+    expect(mcq.questionItem?.question?.choiceQuestion).not.toHaveProperty("shuffle");
   });
 });
 
 describe("identification fields", () => {
-  it("adds a Student Details section before the questions on the first field", () => {
-    const config = addField(reconcileSections(defaultConfig(), [1, 2, 3, 4]), preset("Enrollment No."));
-    expect(config.sections.map((s) => s.kind)).toEqual(["details", "questions"]);
-    expect(config.sections[0].title).toBe("Student Details");
-  });
+  it("adds, edits, duplicates, reorders and deletes fields", () => {
+    let config = fresh();
+    const [enrollment, name, mobile] = config.fields;
+    config = addField(config, { ...blankField(), id: "seat", label: "University Seat No." }, enrollment.id);
+    expect(config.fields.map((f) => f.label)).toEqual(["Enrollment No.", "University Seat No.", "Student Name (as per university records)", "Mobile No."]);
 
-  it("edits, duplicates, reorders and deletes fields", () => {
-    let config = addField(defaultConfig(), preset("Enrollment No."));
-    config = addField(config, preset("Mobile No."));
-    const [a, b] = config.fields;
-    config = updateField(config, a.id, { required: false, description: "As on your ID card" });
-    expect(config.fields[0]).toMatchObject({ required: false, description: "As on your ID card" });
+    config = updateField(config, mobile.id, { required: true, label: "Mobile No. (with country code)" });
+    expect(config.fields[3]).toMatchObject({ required: true, label: "Mobile No. (with country code)" });
 
-    config = duplicateField(config, a.id);
-    expect(config.fields.map((f) => f.label)).toEqual(["Enrollment No.", "Enrollment No. (copy)", "Mobile No."]);
-    expect(config.fields[1].id).not.toBe(a.id);
+    config = duplicateField(config, enrollment.id);
+    expect(config.fields[1]).toMatchObject({ label: "Enrollment No. (copy)" });
+    expect(config.fields[1].id).not.toBe(enrollment.id);
 
-    config = moveField(config, b.id, -1);
-    expect(config.fields.map((f) => f.label)).toEqual(["Enrollment No.", "Mobile No.", "Enrollment No. (copy)"]);
-    expect(moveField(config, a.id, -1)).toEqual(config); // already first
+    config = moveField(config, name.id, -1);
+    expect(config.fields.map((f) => f.label)).toEqual([
+      "Enrollment No.", "Enrollment No. (copy)", "Student Name (as per university records)", "University Seat No.", "Mobile No. (with country code)",
+    ]);
+    expect(moveField(config, enrollment.id, -1)).toEqual(config); // already first
 
-    config = removeField(removeField(removeField(config, a.id), b.id), config.fields[2].id);
+    for (const f of config.fields) config = removeField(config, f.id);
     expect(config.fields).toEqual([]);
-    expect(config.sections.some((s) => s.kind === "details")).toBe(false);
+    // The section stays (two default sections), but an empty one is flagged.
+    expect(config.sections.map((s) => s.kind)).toEqual(["details", "questions"]);
+    expect(validateFormConfig(config, quiz()).errors.map((e) => e.code)).toEqual(["SECTION_EMPTY"]);
   });
 
-  it("supports arbitrary custom fields, not only the presets", () => {
-    let config = reconcileSections(defaultConfig(), [1, 2, 3, 4]);
-    for (const label of ["University Seat No.", "Batch", "Department", "Semester"]) {
-      config = addField(config, { ...blankField(), label });
-    }
-    expect(validateFormConfig(config, quiz()).errors).toEqual([]);
-    expect(planItems(quiz(), config).map((i) => i.label).slice(1, 5)).toEqual([
-      "Field “University Seat No.”", "Field “Batch”", "Field “Department”", "Field “Semester”",
+  it("recreates the Student Identification section if a field is added after it was deleted", () => {
+    const withoutDetails = removeSection(fresh(), "details", "discard").config;
+    expect(withoutDetails.sections.map((s) => s.kind)).toEqual(["questions"]);
+    const config = addField(withoutDetails, { ...blankField(), label: "Roll No." });
+    expect(config.sections.map((s) => [s.kind, s.title])).toEqual([
+      ["details", "Student Identification"],
+      ["questions", "Questions"],
     ]);
   });
 
   it("rejects empty and duplicate labels", () => {
-    let config = reconcileSections(defaultConfig(), [1, 2, 3, 4]);
+    let config = fresh();
     config = addField(config, { ...blankField(), label: "  " });
     config = addField(config, { ...blankField(), label: "Roll No." });
     config = addField(config, { ...blankField(), label: "roll  no." });
@@ -133,62 +147,54 @@ describe("identification fields", () => {
     expect(codes).toEqual(["FIELD_LABEL_MISSING", "FIELD_LABEL_DUPLICATE"]);
   });
 
-  it("validates length and pattern rules, and only on short-answer fields", () => {
-    const base = reconcileSections(defaultConfig(), [1, 2, 3, 4]);
-    const check = (field: Partial<IdField>) => validateFormConfig(addField(base, { ...blankField(), label: "X", ...field }), quiz()).errors.map((e) => e.code);
-    expect(check({ validation: { kind: "length", min: 10, max: 10 } })).toEqual([]);
-    expect(check({ validation: { kind: "length", min: 12, max: 10 } })).toEqual(["FIELD_VALIDATION"]);
-    expect(check({ validation: { kind: "length", min: null, max: null } })).toEqual(["FIELD_VALIDATION"]);
-    expect(check({ validation: { kind: "pattern", pattern: "^\\d{10}$" } })).toEqual([]);
-    expect(check({ validation: { kind: "pattern", pattern: "([" } })).toEqual(["FIELD_VALIDATION"]);
-    expect(check({ type: "number", validation: { kind: "pattern", pattern: "x" } })).toEqual(["FIELD_VALIDATION"]);
-    // Changing the type resets rules that do not apply.
-    const id = addField(base, { ...blankField(), id: "f1", label: "X", validation: { kind: "pattern", pattern: "x" } });
-    expect(updateField(id, "f1", { type: "number" }).fields[0].validation).toEqual({ kind: "none" });
+  it("changing the type sets up or clears options", () => {
+    let config = addField(fresh(), { ...blankField(), id: "f1", label: "Batch" });
+    config = updateField(config, "f1", { type: "dropdown" });
+    expect(config.fields.at(-1)!.options).toEqual(["Option 1"]);
+    config = updateField(config, "f1", { type: "date" });
+    expect(config.fields.at(-1)!.options).toEqual([]);
   });
 
-  it("validates dropdown options", () => {
-    const base = reconcileSections(defaultConfig(), [1, 2, 3, 4]);
+  it("validates choice options", () => {
     const check = (options: string[]) =>
-      validateFormConfig(addField(base, { ...blankField(), label: "Division", type: "dropdown", options }), quiz()).errors.map((e) => e.code);
+      validateFormConfig(addField(fresh(), { ...blankField(), label: "Division", type: "dropdown", options }), quiz()).errors.map((e) => e.code);
     expect(check(["A", "B"])).toEqual([]);
     expect(check([])).toEqual(["FIELD_OPTIONS"]);
     expect(check(["A", " "])).toEqual(["FIELD_OPTIONS"]);
     expect(check(["A", "a"])).toEqual(["FIELD_OPTIONS"]);
   });
 
-  it("creates number and phone fields as text so leading zeros and prefixes are preserved", () => {
-    let config = reconcileSections(defaultConfig(), [1, 2, 3, 4]);
-    config = addField(config, { ...blankField(), label: "Enrollment No.", type: "number" });
-    config = addField(config, { ...blankField(), label: "Division", type: "dropdown", options: ["01", "007", "+91"] });
-    const items = planItems(quiz(), config);
-    const enrollment = items.find((i) => i.label === "Field “Enrollment No.”")!.item;
-    expect(enrollment.questionItem?.question).toEqual({ required: true, textQuestion: { paragraph: false } });
-    const division = items.find((i) => i.label === "Field “Division”")!.item;
-    expect(division.questionItem?.question?.choiceQuestion).toEqual({ type: "DROP_DOWN", options: [{ value: "01" }, { value: "007" }, { value: "+91" }] });
-    // Number validation can't be set through the API, so it becomes a manual step.
-    expect(manualSteps(config, { publish: true })).toContain("Question “Enrollment No.” → ⋮ → Response validation → Number → Is number");
+  it("creates every field type as the matching Google Forms question, without grading", () => {
+    let config = fresh();
+    for (const type of FIELD_TYPES) {
+      config = addField(config, { ...blankField(type), label: `F-${type}`, required: true, options: type === "choice" || type === "checkbox" || type === "dropdown" ? ["01", "+91"] : [] });
+    }
+    const byLabel = Object.fromEntries(planItems(quiz(), config).map((i) => [i.label, i.item.questionItem?.question]));
+    expect(byLabel["Field “F-short”"]).toEqual({ required: true, textQuestion: { paragraph: false } });
+    expect(byLabel["Field “F-paragraph”"]).toEqual({ required: true, textQuestion: { paragraph: true } });
+    expect(byLabel["Field “F-choice”"]).toEqual({ required: true, choiceQuestion: { type: "RADIO", options: [{ value: "01" }, { value: "+91" }] } });
+    expect(byLabel["Field “F-checkbox”"]?.choiceQuestion?.type).toBe("CHECKBOX");
+    expect(byLabel["Field “F-dropdown”"]?.choiceQuestion?.type).toBe("DROP_DOWN");
+    expect(byLabel["Field “F-date”"]).toEqual({ required: true, dateQuestion: { includeYear: true, includeTime: false } });
+    expect(byLabel["Field “F-time”"]).toEqual({ required: true, timeQuestion: { duration: false } });
   });
 
-  it("required and optional fields are sent as such, without grading", () => {
-    const items = planItems(quiz(), examConfig());
-    const fields = items.filter((i) => i.label.startsWith("Field"));
+  it("required and optional default fields are sent as such", () => {
+    const fields = planItems(quiz(), fresh()).filter((i) => i.label.startsWith("Field"));
     expect(fields.map((f) => f.item.questionItem?.question?.required)).toEqual([true, true, false]);
-    expect(fields.every((f) => !f.item.questionItem?.question?.grading)).toBe(true);
   });
 });
 
 describe("sections", () => {
-  it("adds, renames, reorders and deletes sections", () => {
-    let config = reconcileSections(defaultConfig(), [1, 2, 3, 4]);
-    config = addSection(config);
+  it("adds sections inline after a given section, renames, reorders and deletes them", () => {
+    let config = addSection(fresh(), "details");
+    expect(config.sections.map((s) => s.title)).toEqual(["Student Identification", "Untitled section", "Questions"]);
     const id = config.sections[1].id;
     config = updateSection(config, id, { title: "Part B" });
-    expect(config.sections.map((s) => s.title)).toEqual(["Assessment Questions", "Part B"]);
-    config = moveSection(config, id, -1);
-    expect(config.sections.map((s) => s.title)).toEqual(["Part B", "Assessment Questions"]);
+    config = moveSection(config, id, 1);
+    expect(config.sections.map((s) => s.title)).toEqual(["Student Identification", "Questions", "Part B"]);
     const removed = removeSection(config, id, "discard");
-    expect(removed.config.sections.map((s) => s.title)).toEqual(["Assessment Questions"]);
+    expect(removed.config.sections.map((s) => s.title)).toEqual(["Student Identification", "Questions"]);
     expect(removed.discarded).toEqual([]);
   });
 
@@ -220,37 +226,33 @@ describe("sections", () => {
     expect(input).toContain("MARKS: 2");
 
     // The last questions section can't be removed, and an unknown target changes nothing.
-    const single = reconcileSections(defaultConfig(), [1, 2, 3, 4]);
-    expect(removeSection(single, single.sections[0].id, "discard").config).toBe(single);
+    const two = fresh();
+    expect(removeSection(two, "questions", "discard").config).toBe(two);
     expect(removeSection(config, b.id, { moveTo: "nope" }).config).toBe(config);
   });
 
-  it("deleting the Student Details section removes its fields (after confirmation in the UI)", () => {
-    const config = examConfig();
-    const result = removeSection(config, config.sections[0].id, "discard");
+  it("deleting Student Identification removes its fields (after confirmation in the UI)", () => {
+    const result = removeSection(examConfig(), "details", "discard");
     expect(result.config.fields).toEqual([]);
     expect(result.config.sections.every((s) => s.kind === "questions")).toBe(true);
   });
 
   it("reconcile keeps teacher assignments, drops removed questions and places new ones after their predecessor", () => {
     const config = examConfig();
-    const after = reconcileSections(config, [1, 2, 3, 4, 5]);
-    expect(after.sections[2].questions).toEqual([3, 4, 5]);
-    const removed = reconcileSections(config, [1, 3, 4]);
-    expect(removed.sections[1].questions).toEqual([1]);
+    expect(reconcileSections(config, [1, 2, 3, 4, 5]).sections[2].questions).toEqual([3, 4, 5]);
+    expect(reconcileSections(config, [1, 3, 4]).sections[1].questions).toEqual([1]);
     expect(reconcileSections(config, [1, 2, 3, 4])).toBe(config);
   });
 
   it("flags empty sections and assignment mistakes", () => {
-    const empty = addSection(reconcileSections(defaultConfig(), [1, 2, 3, 4]));
+    const empty = addSection(fresh());
     expect(validateFormConfig(empty, quiz()).errors.map((e) => e.code)).toEqual(["SECTION_EMPTY"]);
 
     const broken = structuredClone(examConfig());
     broken.sections[1].questions.push(3); // Q3 now in two sections
     broken.sections[2].questions = broken.sections[2].questions.filter((n) => n !== 4); // Q4 nowhere
     broken.sections[2].questions.push(9); // unknown
-    const messages = validateFormConfig(broken, quiz()).errors.map((e) => e.message);
-    expect(messages).toEqual([
+    expect(validateFormConfig(broken, quiz()).errors.map((e) => e.message)).toEqual([
       "Not assigned to a section: Q4.",
       "Assigned to more than one section: Q3.",
       "Sections refer to questions that are not in your text: Q9.",
@@ -265,37 +267,37 @@ describe("sections", () => {
       return `${r.createItem!.location!.index}:${kind}:${item.title}`;
     });
     expect(shape).toEqual([
-      "0:text:Student Details",
+      "0:text:Student Identification",
       "1:short:Enrollment No.",
       "2:short:Student Name (as per university records)",
       "3:short:Mobile No.",
-      "4:pageBreak:Assessment Questions",
+      "4:pageBreak:Questions",
       "5:mcq:Question 1?",
       "6:mcq:Question 2?",
       "7:pageBreak:Part B",
       "8:mcq:Question 3?",
       "9:mcq:Question 4?",
     ]);
+    expect(requests[0].createItem?.item?.description).toBe("Please provide the following details.");
     expect(requests[7].createItem?.item?.description).toBe("Answer all.");
     expect(requests[4].createItem?.item).not.toHaveProperty("description");
   });
 
-  it("puts instructions first and gives a single section no extra heading", () => {
-    const config = { ...reconcileSections(defaultConfig(), [1, 2, 3, 4]), instructions: "No calculators." };
-    const items = planItems(quiz(), config).map((i) => i.item);
-    expect(items[0]).toEqual({ title: "Instructions", description: "No calculators.", textItem: {} });
-    expect(items.slice(1).every((i) => i.questionItem)).toBe(true);
+  it("a single section gets no extra heading", () => {
+    const items = planItems(quiz(), reconcileSections(legacyConfig(), [1, 2, 3, 4])).map((i) => i.item);
+    expect(items.every((i) => i.questionItem)).toBe(true);
   });
 
   it("the plan used by the preview matches the created order and totals", () => {
     const plan = buildFormPlan(quiz(), moveQuestionWithinSection(examConfig(), 4, -1));
     expect(plan.sections.map((s) => s.questions.map((q) => q.number))).toEqual([[], [1, 2], [4, 3]]);
+    expect(plan.sections[0].fields).toHaveLength(3);
     expect(plan.questionCount).toBe(4);
     expect(plan.totalMarks).toBe(10);
   });
 });
 
-describe("quiz settings", () => {
+describe("fixed settings", () => {
   it("applies quiz mode and verified email collection through updateSettings", () => {
     expect(buildSettingsRequests({ ...quiz(), description: "" }, defaultConfig())).toEqual([
       {
@@ -307,54 +309,31 @@ describe("quiz settings", () => {
     ]);
   });
 
-  it("never marks settings the API can't set as applied", () => {
-    const reports = describeSettings(defaultConfig(), { publish: true });
-    const status = Object.fromEntries(reports.map((r) => [r.key, r.status]));
-    expect(status).toMatchObject({
-      isQuiz: "auto",
-      grading: "auto",
-      emailCollection: "auto",
-      publish: "auto",
-      releaseGrades: "manual",
-      showMissed: "manual",
-      showCorrect: "manual",
-      showPoints: "manual",
-      sendCopy: "manual",
-      allowEditing: "manual",
-      limitOneResponse: "manual",
-      access: "needs_auth",
-      globalDefaults: "unsupported",
+  it("the server forces the fixed settings whatever the client sends", () => {
+    const tampered = { ...fresh(), quiz: { ...fresh().quiz, isQuiz: false }, responses: { ...fresh().responses, emailCollection: "do_not_collect" as const } };
+    const fixed = withFixedSettings(tampered);
+    expect(buildSettingsRequests({ ...quiz(), description: "" }, fixed)[0].updateSettings?.settings).toEqual({
+      quizSettings: { isQuiz: true },
+      emailCollectionType: "VERIFIED",
     });
-    expect(manualSteps(defaultConfig(), { publish: true })).toContain("Settings → Quizzes → Release grades → Later, after manual review");
   });
 
-  it("reflects the teacher's choices in the settings summary", () => {
-    const config = defaultConfig();
-    config.quiz.releaseGrades = "immediately";
-    config.quiz.showCorrect = true;
-    config.responses.emailCollection = "responder_input";
-    const values = Object.fromEntries(describeSettings(config, { publish: false }).map((r) => [r.key, r.value]));
-    expect(values).toMatchObject({ releaseGrades: "Immediately after each submission", showCorrect: "On", emailCollection: "Responder input", publish: "No (draft)" });
+  it("drafts with response-validation rules from the previous version still load (rules are ignored)", () => {
+    const old = structuredClone(defaultConfig()) as unknown as { fields: Record<string, unknown>[] };
+    old.fields[0].validation = { category: "length", operator: "max", value: "10", value2: "", errorText: "" };
+    const parsed = formConfigSchema.safeParse(old);
+    expect(parsed.success && parsed.data.fields[0]).not.toHaveProperty("validation");
   });
 
-  it("quiz mode off creates ungraded questions and warns the teacher", () => {
-    const config = reconcileSections(defaultConfig(), [1, 2, 3, 4]);
-    config.quiz.isQuiz = false;
-    expect(validateFormConfig(config, quiz()).warnings.map((w) => w.code)).toContain("QUIZ_OFF");
-    expect(buildContentRequests(quiz(), config).every((r) => !r.createItem?.item?.questionItem?.question?.grading)).toBe(true);
-    expect(describeSettings(config, { publish: true }).some((r) => r.key === "releaseGrades")).toBe(false);
+  it("MCQs are required", () => {
+    expect(buildContentRequests(quiz(), fresh()).filter((r) => r.createItem?.item?.questionItem?.question?.grading).every((r) => r.createItem?.item?.questionItem?.question?.required)).toBe(true);
   });
 
-  it("questions follow the 'required by default' setting", () => {
-    const config = reconcileSections(defaultConfig(), [1, 2, 3, 4]);
-    config.defaults.required = false;
-    expect(buildContentRequests(quiz(), config).every((r) => r.createItem?.item?.questionItem?.question?.required === false)).toBe(true);
-  });
-
-  it("the server schema rejects malformed settings", () => {
+  it("the server schema rejects malformed configs and the removed instructions field is ignored", () => {
     const body = { title: "t", input: INPUT, config: { ...defaultConfig(), responses: { ...defaultConfig().responses, emailCollection: "everyone" } } };
     expect(createFormRequestSchema.safeParse(body).success).toBe(false);
-    expect(createFormRequestSchema.safeParse({ ...body, config: defaultConfig() }).success).toBe(true);
+    const parsed = createFormRequestSchema.safeParse({ ...body, config: { ...defaultConfig(), instructions: "x" } });
+    expect(parsed.success && parsed.data.config).not.toHaveProperty("instructions");
   });
 });
 

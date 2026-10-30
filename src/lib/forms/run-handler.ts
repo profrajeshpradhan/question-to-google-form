@@ -1,7 +1,7 @@
 import "server-only";
 import type { NextRequest } from "next/server";
 import { getRateLimits } from "@/lib/config";
-import { legacyConfig, reconcileSections, validateFormConfig } from "@/lib/quiz/form-config";
+import { legacyConfig, reconcileSections, validateFormConfig, withFixedSettings } from "@/lib/quiz/form-config";
 import { parseQuiz } from "@/lib/quiz/parser";
 import { apiError, requireSessionForMutation } from "@/lib/security/guard";
 import { clientIp, rateLimit } from "@/lib/security/rate-limit";
@@ -62,7 +62,10 @@ export async function handleFormRun(request: NextRequest, formIdParam?: string):
   if (!parsed.ok) {
     return apiError("validation_failed", "Some questions are invalid. Fix them and validate again.", 422, { issues: parsed.errors });
   }
-  const config = body.data.config ?? reconcileSections(legacyConfig(), parsed.quiz.questions.map((q) => q.number));
+  // Settings are fixed in this version; only fields and sections come from the client.
+  const config = body.data.config
+    ? withFixedSettings(body.data.config)
+    : reconcileSections(legacyConfig(), parsed.quiz.questions.map((q) => q.number));
   const configIssues = validateFormConfig(config, parsed.quiz).errors;
   if (configIssues.length > 0) {
     return apiError("validation_failed", "Some form settings are invalid. Fix them and validate again.", 422, { issues: configIssues });

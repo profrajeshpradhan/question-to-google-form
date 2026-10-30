@@ -35,7 +35,7 @@ export function DashboardShell({ session, children }: { session: PublicSession; 
   ];
 
   return (
-    <div className="flex min-h-full flex-1 flex-col bg-canvas">
+    <div className="flex min-h-full flex-1 flex-col bg-forms-bg">
       <header className="sticky top-0 z-30 bg-brand-600 text-white shadow-md">
         <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-3 px-4 sm:px-6">
           <a href="/dashboard" className="flex min-w-0 items-center gap-2.5 rounded-lg" aria-label="Question to Google Form dashboard">

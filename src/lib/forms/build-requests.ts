@@ -1,5 +1,5 @@
 import type { forms_v1 } from "@googleapis/forms";
-import type { EmailCollection, FormConfig, IdField } from "@/lib/quiz/form-config";
+import { hasOptions, type EmailCollection, type FormConfig, type IdField } from "@/lib/quiz/form-config";
 import { buildFormPlan, firstSectionHasHeading } from "@/lib/quiz/form-plan";
 import type { Quiz, QuizOption, QuizQuestion } from "@/lib/quiz/types";
 
@@ -71,14 +71,22 @@ function withDescription(item: forms_v1.Schema$Item, description: string): forms
   return description ? { ...item, description } : item;
 }
 
+const CHOICE_TYPES = { choice: "RADIO", checkbox: "CHECKBOX", dropdown: "DROP_DOWN" } as const;
+
+function fieldQuestion(field: IdField): forms_v1.Schema$Question {
+  const required = field.required;
+  if (hasOptions(field.type)) {
+    const type = CHOICE_TYPES[field.type as keyof typeof CHOICE_TYPES];
+    return { required, choiceQuestion: { type, options: field.options.map((value) => ({ value })) } };
+  }
+  if (field.type === "date") return { required, dateQuestion: { includeYear: true, includeTime: false } };
+  if (field.type === "time") return { required, timeQuestion: { duration: false } };
+  // Text answers keep leading zeros and "+91" prefixes exactly as typed.
+  return { required, textQuestion: { paragraph: field.type === "paragraph" } };
+}
+
 function fieldItem(field: IdField): forms_v1.Schema$Item {
-  // Number and email fields are short-answer questions: the Forms API cannot set
-  // response validation, so leading zeros and "+91" prefixes are kept as typed.
-  const question: forms_v1.Schema$Question =
-    field.type === "dropdown" || field.type === "choice"
-      ? { required: field.required, choiceQuestion: { type: field.type === "dropdown" ? "DROP_DOWN" : "RADIO", options: field.options.map((value) => ({ value })) } }
-      : { required: field.required, textQuestion: { paragraph: false } };
-  return withDescription({ title: field.label, questionItem: { question } }, field.description);
+  return { title: field.label, questionItem: { question: fieldQuestion(field) } };
 }
 
 function mcqItem(question: QuizQuestion, config: FormConfig): forms_v1.Schema$Item {
@@ -100,14 +108,13 @@ function mcqItem(question: QuizQuestion, config: FormConfig): forms_v1.Schema$It
 }
 
 /**
- * Every item in respondent order: optional instructions, then each section.
+ * Every item in respondent order, section by section.
  * Sections after the first start with a page break (Google Forms' section
  * header); the first section shares the page with the form title.
  */
 export function planItems(quiz: Quiz, config: FormConfig): PlannedItem[] {
   const plan = buildFormPlan(quiz, config);
   const items: PlannedItem[] = [];
-  if (plan.instructions) items.push({ label: "Instructions", item: { title: "Instructions", description: plan.instructions, textItem: {} } });
   plan.sections.forEach((section, index) => {
     const label = `Section “${section.title}”`;
     if (index > 0) items.push({ label, item: withDescription({ title: section.title, pageBreakItem: {} }, section.description) });
@@ -135,9 +142,13 @@ export interface VerificationProblem {
 function kindOf(item: forms_v1.Schema$Item): string {
   if (item.pageBreakItem) return "section";
   if (item.textItem) return "heading";
-  if (item.questionItem?.question?.textQuestion) return "short answer";
-  const type = item.questionItem?.question?.choiceQuestion?.type;
+  const question = item.questionItem?.question;
+  if (question?.textQuestion) return question.textQuestion.paragraph ? "paragraph" : "short answer";
+  if (question?.dateQuestion) return "date";
+  if (question?.timeQuestion) return "time";
+  const type = question?.choiceQuestion?.type;
   if (type === "RADIO") return "multiple choice";
+  if (type === "CHECKBOX") return "checkboxes";
   if (type === "DROP_DOWN") return "dropdown";
   return item.questionItem ? "other question" : "other item";
 }

@@ -132,3 +132,30 @@ export const TrashIcon = (p: IconProps) => (
 export const EyeIcon = (p: IconProps) => (
   <svg {...base(p)}><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" /><circle cx="12" cy="12" r="3" /></svg>
 );
+export const CalendarIcon = (p: IconProps) => (
+  <svg {...base(p)}><rect x="3" y="4" width="18" height="18" rx="2" /><path d="M16 2v4M8 2v4M3 10h18" /></svg>
+);
+export const PlusCircleIcon = (p: IconProps) => (
+  <svg {...base(p)}><circle cx="12" cy="12" r="10" /><path d="M12 8v8M8 12h8" /></svg>
+);
+export const SectionIcon = (p: IconProps) => (
+  <svg {...base(p)}><rect x="3" y="3" width="18" height="7" rx="1.5" /><rect x="3" y="14" width="18" height="7" rx="1.5" /></svg>
+);
+export const MoreVerticalIcon = (p: IconProps) => (
+  <svg {...base(p)}><circle cx="12" cy="5" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="12" cy="19" r="1" /></svg>
+);
+export const ShortTextIcon = (p: IconProps) => (
+  <svg {...base(p)}><path d="M4 9h16M4 15h10" /></svg>
+);
+export const ParagraphIcon = (p: IconProps) => (
+  <svg {...base(p)}><path d="M4 6h16M4 10h16M4 14h16M4 18h10" /></svg>
+);
+export const RadioIcon = (p: IconProps) => (
+  <svg {...base(p)}><circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="4" fill="currentColor" /></svg>
+);
+export const CheckboxIcon = (p: IconProps) => (
+  <svg {...base(p)}><rect x="3" y="3" width="18" height="18" rx="3" /><path d="m8 12 3 3 5-6" /></svg>
+);
+export const DropdownIcon = (p: IconProps) => (
+  <svg {...base(p)}><circle cx="12" cy="12" r="9" /><path d="m8 11 4 4 4-4" /></svg>
+);

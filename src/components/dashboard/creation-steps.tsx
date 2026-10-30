@@ -3,6 +3,7 @@
 import { CheckIcon, FormDocIcon, Spinner, XIcon } from "@/components/ui/icons";
 import { Card, cx } from "@/components/ui/primitives";
 import { STEP_LABELS, STEP_ORDER, type StepId, type StepStatus } from "@/lib/forms/events";
+import { DonationCard } from "./donation-card";
 
 export type StepMap = Record<StepId, StepStatus>;
 
@@ -63,21 +64,29 @@ export function StepList({ steps, resume = false }: { steps: StepMap; resume?: b
 
 export function CreatingStep({ steps, resume }: { steps: StepMap; resume: boolean }) {
   const completed = STEP_ORDER.filter((id) => steps[id] === "done" || steps[id] === "skipped").length;
+  // Progress comes first on phones; on wide screens the donation appeal sits on the left.
   return (
-    <Card className="mx-auto max-w-xl p-6 sm:p-8">
-      <div className="flex flex-col items-center text-center">
-        <span className="flex h-16 w-16 items-center justify-center rounded-2xl bg-brand-50 text-brand-600">
-          <FormDocIcon size={34} />
-        </span>
-        <h1 className="mt-4 text-xl font-extrabold text-ink">{resume ? "Finishing your Google Form" : "Creating your Google Form"}</h1>
-        <p className="mt-1 text-sm text-muted">Please keep this page open while your form is being created.</p>
-      </div>
-      <div className="mt-6" aria-live="polite">
-        <StepList steps={steps} resume={resume} />
-      </div>
-      <p className="mt-5 text-center text-xs text-muted">
-        {completed} of {STEP_ORDER.length} steps confirmed by Google
-      </p>
-    </Card>
+    <div className="mx-auto grid max-w-5xl items-start gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+      <Card className="p-6 sm:p-8 lg:order-2">
+        <div className="flex flex-col items-center text-center">
+          <span className="flex h-16 w-16 items-center justify-center rounded-2xl bg-brand-50 text-brand-600">
+            <FormDocIcon size={34} />
+          </span>
+          <h1 className="mt-4 text-xl font-extrabold text-ink">{resume ? "Finishing your Google Form" : "Creating your Google Form"}</h1>
+          <p className="mt-1 text-sm text-muted">Please keep this page open while your form is being created.</p>
+        </div>
+        <div className="mt-6" aria-live="polite">
+          <StepList steps={steps} resume={resume} />
+        </div>
+        <p className="mt-5 text-center text-xs text-muted">
+          {completed} of {STEP_ORDER.length} steps done
+        </p>
+      </Card>
+      <DonationCard
+        heading="While you wait…"
+        message="This tool is free. Please consider a small donation to support underprivileged students."
+        className="mx-auto w-full max-w-md shadow-card lg:order-1 lg:max-w-none"
+      />
+    </div>
   );
 }

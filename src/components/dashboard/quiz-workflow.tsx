@@ -14,16 +14,16 @@ import {
   reconcileSections,
   removeQuestionBlocks,
   validateFormConfig,
+  withFixedSettings,
   type FormConfig,
 } from "@/lib/quiz/form-config";
 import { parseQuiz, SAMPLE_INPUT } from "@/lib/quiz/parser";
 import type { ParseResult, ValidationIssue } from "@/lib/quiz/types";
 import { CreatingStep, initialSteps, type StepMap } from "./creation-steps";
-import { EditorStep } from "./editor-step";
+import { FormCanvas, type FlowStatus } from "./form-canvas";
 import { FormatExampleModal } from "./format-example-modal";
 import { PreviewStep } from "./preview-step";
 import { FailureStep, SuccessStep, type FailureInfo } from "./result-steps";
-import { ValidationStep } from "./validation-step";
 
 type Valid = Extract<ParseResult, { ok: true }>;
 /** Exactly what was validated; this snapshot (not live editor text) is what gets created. */
@@ -32,14 +32,18 @@ interface Snapshot {
   description: string;
   input: string;
   parsed: Valid;
-  /** Settings, identification fields and sections, reconciled with the parsed questions and validated. */
+  /** Identification fields, sections and fixed settings, reconciled with the parsed questions and validated. */
   config: FormConfig;
   configWarnings: ValidationIssue[];
 }
 
+/** Identity of everything that affects the created form; a change makes validation and preview stale. */
+function contentKey(title: string, description: string, input: string, config: FormConfig): string {
+  return JSON.stringify([title, description, input, config]);
+}
+
 type Stage =
   | { name: "edit" }
-  | { name: "validated"; snap: Snapshot }
   | { name: "preview"; snap: Snapshot; autoConfirm?: boolean }
   | { name: "creating"; snap: Snapshot; resume: boolean }
   | { name: "success"; snap: Snapshot; result: CreateResult }
@@ -56,7 +60,10 @@ export function QuizWorkflow({ session }: { session: PublicSession }) {
   const [title, setTitle] = useState(initialDraft?.title ?? "");
   const [description, setDescription] = useState(initialDraft?.description ?? "");
   const [input, setInput] = useState(initialDraft?.input ?? "");
-  const [storedConfig, setConfig] = useState<FormConfig>(() => initialDraft?.config ?? defaultConfig());
+  const [storedConfig, setConfig] = useState<FormConfig>(() => (initialDraft?.config ? withFixedSettings(initialDraft.config) : defaultConfig()));
+  /** The last successful validation; it counts only while its key matches the current content. */
+  const [validation, setValidation] = useState<{ key: string; snap: Snapshot } | null>(null);
+  const [previewedKey, setPreviewedKey] = useState<string | null>(null);
   const [pendingForm, setPendingForm] = useState<Draft["pendingForm"]>(initialDraft?.pendingForm);
   const [errors, setErrors] = useState<ValidationIssue[] | null>(null);
   const [stage, setStage] = useState<Stage>({ name: "edit" });
@@ -80,6 +87,22 @@ export function QuizWorkflow({ session }: { session: PublicSession }) {
     [storedConfig, liveQuiz],
   );
   const updateConfig = useCallback((fn: (c: FormConfig) => FormConfig) => setConfig(fn(config)), [config]);
+
+  const currentKey = useMemo(() => contentKey(title, description, input, config), [title, description, input, config]);
+  const validationCurrent = validation?.key === currentKey;
+  const previewCurrent = validationCurrent && previewedKey === currentKey;
+  const flowStatus: FlowStatus = previewCurrent
+    ? "previewed"
+    : validationCurrent
+      ? previewedKey
+        ? "preview-stale"
+        : "validated"
+      : errors?.length
+        ? "invalid"
+        : validation
+          ? "validation-stale"
+          : "draft";
+  const canConvert = previewCurrent && online && !expired;
 
   // Keep the draft in this tab (survives reloads and the Google reconnect redirect).
   useEffect(() => {
@@ -110,21 +133,34 @@ export function QuizWorkflow({ session }: { session: PublicSession }) {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }, [stage.name]);
 
-  /** Validates questions and configuration together; on success goes to the chosen screen. */
-  const validate = (next: "validated" | "preview" | "confirm" = "validated") => {
+  /** Step 1: validates questions, fields and sections together, staying on the canvas. */
+  const validate = () => {
     const result = parseQuiz({ input, title, description });
     const reconciled = result.ok ? reconcileSections(config, result.quiz.questions.map((q) => q.number)) : config;
     const configCheck = validateFormConfig(reconciled, result.ok ? result.quiz : { questions: [] });
     const allErrors = [...(result.ok ? [] : result.errors), ...configCheck.errors];
     if (!result.ok || allErrors.length > 0) {
       setErrors(allErrors);
+      setValidation(null);
       return;
     }
     setErrors(null);
     setConfig(reconciled);
     const snap: Snapshot = { title, description, input, parsed: result, config: reconciled, configWarnings: configCheck.warnings };
-    if (next === "validated") setStage({ name: "validated", snap });
-    else setStage({ name: "preview", snap, autoConfirm: next === "confirm" });
+    setValidation({ key: contentKey(title, description, input, reconciled), snap });
+  };
+
+  /** Step 2: only a current validation can be previewed. */
+  const preview = () => {
+    if (!validationCurrent || !validation) return;
+    setPreviewedKey(currentKey);
+    setStage({ name: "preview", snap: validation.snap });
+  };
+
+  /** Step 3: only content whose preview is current can be converted (confirmation dialog opens). */
+  const convert = () => {
+    if (!canConvert || !validation) return;
+    setStage({ name: "preview", snap: validation.snap, autoConfirm: true });
   };
 
   const insertTemplate = () => {
@@ -202,6 +238,7 @@ export function QuizWorkflow({ session }: { session: PublicSession }) {
       if (outcome.kind === "http-error") {
         if (outcome.code === "validation_failed" && outcome.issues) {
           setErrors(outcome.issues);
+          setValidation(null);
           setStage({ name: "edit" });
           return;
         }
@@ -245,7 +282,10 @@ export function QuizWorkflow({ session }: { session: PublicSession }) {
     setTitle("");
     setDescription("");
     setInput("");
+    setConfig(defaultConfig());
     setErrors(null);
+    setValidation(null);
+    setPreviewedKey(null);
     setPendingForm(undefined);
     clearDraft();
     setStage({ name: "edit" });
@@ -284,7 +324,7 @@ export function QuizWorkflow({ session }: { session: PublicSession }) {
             Your previous input in this tab was restored.
           </Alert>
         )}
-        {pendingForm && (stage.name === "edit" || stage.name === "preview" || stage.name === "validated") && (
+        {pendingForm && (stage.name === "edit" || stage.name === "preview") && (
           <Alert
             tone="warning"
             title="You have an unfinished form from an earlier attempt"
@@ -312,7 +352,7 @@ export function QuizWorkflow({ session }: { session: PublicSession }) {
       </div>
 
       {stage.name === "edit" && (
-        <EditorStep
+        <FormCanvas
           ref={textareaRef}
           title={title}
           description={description}
@@ -320,11 +360,18 @@ export function QuizWorkflow({ session }: { session: PublicSession }) {
           config={config}
           liveQuiz={liveQuiz}
           onConfig={updateConfig}
-          onPreview={() => validate("preview")}
-          onConvert={() => validate("confirm")}
+          status={flowStatus}
+          validated={
+            validationCurrent && validation
+              ? { summary: validation.snap.parsed.summary, warnings: [...validation.snap.parsed.warnings, ...validation.snap.configWarnings] }
+              : null
+          }
+          canPreview={validationCurrent}
+          canConvert={canConvert}
+          onPreview={preview}
+          onConvert={convert}
           onInsertTemplate={insertTemplate}
           onDiscardQuestions={discardQuestions}
-          canConvert={online && !expired}
           onTitle={(v) => {
             setTitle(v);
             setRestored(false);
@@ -334,23 +381,11 @@ export function QuizWorkflow({ session }: { session: PublicSession }) {
             setInput(v);
             setRestored(false);
           }}
-          onValidate={() => validate()}
+          onValidate={validate}
           onClear={() => (input || title || description ? setConfirmClear(true) : undefined)}
           onShowExample={() => setShowExample(true)}
           errors={errors}
           onJumpToLine={jumpToLine}
-        />
-      )}
-
-      {stage.name === "validated" && (
-        <ValidationStep
-          quiz={stage.snap.parsed.quiz}
-          summary={stage.snap.parsed.summary}
-          warnings={[...stage.snap.parsed.warnings, ...stage.snap.configWarnings]}
-          config={stage.snap.config}
-          sources={stage.snap.parsed.sources}
-          onEdit={backToEdit}
-          onPreview={() => setStage({ name: "preview", snap: stage.snap })}
         />
       )}
 
@@ -373,7 +408,7 @@ export function QuizWorkflow({ session }: { session: PublicSession }) {
 
       {stage.name === "creating" && <CreatingStep steps={steps} resume={stage.resume} />}
 
-      {stage.name === "success" && <SuccessStep result={stage.result} config={stage.snap.config} onCreateAnother={resetAll} onBackToEditor={backToEdit} />}
+      {stage.name === "success" && <SuccessStep result={stage.result} onCreateAnother={resetAll} onBackToEditor={backToEdit} />}
 
       {stage.name === "failed" && (
         <FailureStep

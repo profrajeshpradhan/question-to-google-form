@@ -12,7 +12,7 @@ async function toPreview(page: Page, title = "Introduction to IT Systems", input
   await fillEditor(page, { title, description: "Unit 1 Assessment", input });
   await page.getByRole("button", { name: "Validate Questions" }).click();
   await expect(page.getByText("Validation successful!")).toBeVisible();
-  await page.getByRole("button", { name: "View Preview" }).click();
+  await page.getByRole("button", { name: "Preview Form" }).click();
   await expect(page.getByRole("heading", { name: "Preview Your Google Form" })).toBeVisible();
 }
 
@@ -94,14 +94,17 @@ test("validation summary and preview match the parsed questions", async ({ page 
   await expect(summary).toContainText("2Questions");
   await expect(summary).toContainText("8Options");
   await expect(summary).toContainText("3Total marks");
-  await expect(page.getByText("4 options · Answer: A · 2 marks")).toBeVisible();
-  await expect(page.getByText("4 options · Answer: B · 1 mark")).toBeVisible();
+  // Parsed questions appear as cards in the Questions section.
+  const cards = page.getByTestId("question-card");
+  await expect(cards).toHaveCount(2);
+  await expect(cards.nth(0)).toContainText("(2 marks)");
+  await expect(cards.nth(1).locator("li", { hasText: "Correct answer" })).toContainText("B. HTML");
 
-  // Edit Input keeps the content, then come back.
-  await page.getByRole("button", { name: "Edit Input" }).click();
+  // Back to Editor keeps the content.
+  await page.getByRole("button", { name: "Preview Form" }).click();
+  await page.getByRole("button", { name: "Back to Editor" }).click();
   await expect(page.getByLabel("Paste Your Questions")).toHaveValue(SAMPLE);
-  await page.getByRole("button", { name: "Validate Questions" }).click();
-  await page.getByRole("button", { name: "View Preview" }).click();
+  await page.getByRole("button", { name: "Preview Form" }).click();
 
   await expect(page.getByTestId("preview-title")).toHaveText("Introduction to IT Systems");
   await expect(page.getByText("Total questions: 2 | Total marks: 3")).toBeVisible();
@@ -117,11 +120,33 @@ test("validation summary and preview match the parsed questions", async ({ page 
   expect((await mockStats()).creates).toBe(0);
 });
 
+test("the progress screen shows the donation appeal beside the steps @mobile", async ({ page }) => {
+  await toPreview(page);
+  // Hold the create request so the progress screen stays up.
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  await page.route("**/api/forms", async (route) => {
+    await held;
+    await route.continue();
+  });
+  await confirmCreate(page);
+  await expect(page.getByRole("heading", { name: "Creating your Google Form" })).toBeVisible();
+  const donation = page.getByTestId("donation");
+  await expect(donation.getByRole("img", { name: /Satyam Education Charitable Trust/ })).toBeVisible();
+  const [steps, appeal] = await Promise.all([page.getByRole("list", { name: "Creation steps" }).boundingBox(), donation.boundingBox()]);
+  const wide = (page.viewportSize()?.width ?? 0) >= 1024;
+  // Left of the steps on wide screens; below them on phones so progress is seen first.
+  if (wide) expect(appeal!.x + appeal!.width).toBeLessThanOrEqual(steps!.x);
+  else expect(appeal!.y).toBeGreaterThan(steps!.y);
+  release();
+  await expect(page.getByTestId("success-title")).toBeVisible();
+});
+
 test("creates, verifies and publishes the quiz, then shows real links", async ({ page }) => {
   await toPreview(page);
   await confirmCreate(page);
   await expect(page.getByTestId("success-title")).toBeVisible();
-  await expect(page.getByText("Published · accepting responses")).toBeVisible();
+  await expect(page.getByText("Live · accepting responses")).toBeVisible();
   const edit = page.getByTestId("edit-link");
   await expect(edit).toHaveAttribute("href", /^https:\/\/docs\.google\.com\/forms\/d\/MOCKFORM\d+abcdef\/edit$/);
   await expect(edit).toHaveAttribute("target", "_blank");
@@ -145,8 +170,8 @@ test("can create an unpublished draft", async ({ page }) => {
   await toPreview(page);
   await confirmCreate(page, { publish: false });
   await expect(page.getByTestId("success-title")).toBeVisible();
-  await expect(page.getByText("Unpublished draft", { exact: true })).toBeVisible();
-  await expect(page.getByText("Respondent link not active yet")).toBeVisible();
+  await expect(page.getByText("Not published yet", { exact: true })).toBeVisible();
+  await expect(page.getByText("The form is not published yet")).toBeVisible();
   expect((await mockStats()).publishes).toBe(0);
 });
 

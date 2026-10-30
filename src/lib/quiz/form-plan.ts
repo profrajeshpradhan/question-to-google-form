@@ -18,7 +18,6 @@ export interface PlanSection {
 export interface FormPlan {
   title: string;
   description: string;
-  instructions: string;
   sections: PlanSection[];
   questionCount: number;
   totalMarks: number;
@@ -36,7 +35,7 @@ export function buildFormPlan(quiz: Quiz, config: FormConfig): FormPlan {
     description: section.description.trim(),
     fields:
       section.kind === "details"
-        ? config.fields.map((f) => ({ ...f, label: tidy(f.label), description: f.description.trim(), options: f.options.map(tidy) }))
+        ? config.fields.map((f) => ({ ...f, label: tidy(f.label), options: f.options.map(tidy) }))
         : [],
     questions: section.kind === "questions" ? section.questions.flatMap((n) => byNumber.get(n) ?? []) : [],
   }));
@@ -44,7 +43,6 @@ export function buildFormPlan(quiz: Quiz, config: FormConfig): FormPlan {
   return {
     title: quiz.title,
     description: quiz.description,
-    instructions: config.instructions.trim(),
     sections,
     questionCount: questions.length,
     totalMarks: questions.reduce((sum, q) => sum + q.marks, 0),
